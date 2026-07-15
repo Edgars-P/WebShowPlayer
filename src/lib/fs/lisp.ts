@@ -27,12 +27,6 @@ const EVENT_MAP: Record<string, TriggerEvent> = {
   Ended: 'onStop',
 };
 
-interface Pos {
-  tabIndex: number;
-  row: number;
-  col: number;
-}
-
 /** Does this look like a LiSP session rather than a native project? */
 export function looksLikeLisp(data: unknown): boolean {
   return (
@@ -59,10 +53,10 @@ export function convertLisp(data: unknown): Project {
   };
 
   const lispCues = Array.isArray(root.cues) ? (root.cues as Record<string, unknown>[]) : [];
-  const idPos = new Map<string, Pos>();
+  const idMap = new Map<string, string>(); // LiSP cue id -> our cue id
   const converted: { cue: AudioCue; lisp: Record<string, unknown> }[] = [];
 
-  // First pass: place each media cue and remember its id -> position.
+  // First pass: place each media cue and remember its LiSP id -> our id.
   for (const lc of lispCues) {
     if (lc._type_ !== 'GstMediaCue') continue;
     const index = typeof lc.index === 'number' ? lc.index : 0;
@@ -72,13 +66,13 @@ export function convertLisp(data: unknown): Project {
     const col = slot % COLS;
     const cue = toAudioCue(lc, row, col);
     tabs[page].cues.push(cue);
-    if (typeof lc.id === 'string') idPos.set(lc.id, { tabIndex: page, row, col });
+    if (typeof lc.id === 'string') idMap.set(lc.id, cue.id);
     converted.push({ cue, lisp: lc });
   }
 
-  // Second pass: resolve triggers now that every cue has a position.
+  // Second pass: resolve triggers now that every cue has an id.
   for (const { cue, lisp } of converted) {
-    cue.triggers = convertTriggers(lisp, tabs, idPos);
+    cue.triggers = convertTriggers(lisp, idMap);
   }
 
   return { version: PROJECT_VERSION, grid: { rows: ROWS, cols: COLS }, masterVolume: 1, tabs };
@@ -121,11 +115,7 @@ function normalizeUri(uri: string): string {
   return u;
 }
 
-function convertTriggers(
-  lc: Record<string, unknown>,
-  tabs: Tab[],
-  idPos: Map<string, Pos>,
-): Trigger[] {
+function convertTriggers(lc: Record<string, unknown>, idMap: Map<string, string>): Trigger[] {
   const out: Trigger[] = [];
   const triggers = lc.triggers;
   if (!triggers || typeof triggers !== 'object') return out;
@@ -134,12 +124,12 @@ function convertTriggers(
     if (!event || !Array.isArray(list)) continue;
     for (const pair of list) {
       if (!Array.isArray(pair) || pair.length < 2) continue;
-      const pos = idPos.get(String(pair[0]));
-      if (!pos) continue;
+      const cueId = idMap.get(String(pair[0]));
+      if (!cueId) continue;
       out.push({
         event,
         action: mapAction(String(pair[1])),
-        target: { tab: tabs[pos.tabIndex].id, row: pos.row, col: pos.col },
+        target: { cueId },
       });
     }
   }

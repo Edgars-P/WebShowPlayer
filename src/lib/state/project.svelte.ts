@@ -26,6 +26,7 @@ import {
   type PlaybackState,
   type Project,
   type Tab,
+  type TimerAction,
   type TimerCue,
   type Trigger,
   type TriggerAction,
@@ -88,6 +89,9 @@ export class AppState {
   private timerEndsAt = 0;
   private timerInterval = 0;
   private timerWindow = new TimerWindow();
+  /** Id of the timer cue that last set the running countdown, so its onStop
+   *  triggers can fire when the timer runs out naturally. */
+  private timerCueId: string | null = null;
 
   // Trigger re-entrancy guard.
   private firing = new Set<string>();
@@ -293,10 +297,13 @@ export class AppState {
   // ---- Cue resolution ----------------------------------------------------
 
   resolveRef(ref: CueRef): Cue | null {
+    return this.findCue(ref.cueId);
+  }
+
+  /** Which tab currently holds this cue. */
+  tabOf(cue: Cue): Tab | null {
     if (!this.project) return null;
-    const tab = this.project.tabs.find((t) => t.id === ref.tab);
-    if (!tab) return null;
-    return tab.cues.find((c) => c.row === ref.row && c.col === ref.col) ?? null;
+    return this.project.tabs.find((t) => t.cues.some((c) => c.id === cue.id)) ?? null;
   }
 
   /** Follow a proxy to the cue that actually holds the media. */
@@ -337,25 +344,46 @@ export class AppState {
     this.propagate(() => this.performAction(cue, 'click'));
   }
 
-  private performAction(cue: Cue, action: TriggerAction): void {
+  private performAction(cue: Cue, action: TriggerAction, fade?: boolean): void {
     const target = this.resolveProxy(cue);
     if (!target) return;
     this.firing.add(target.id);
 
     if (target.type === 'audio') {
-      if (action === 'click') this.engine.toggle(target);
-      else if (action === 'start') this.engine.start(target, false);
-      else this.engine.stop(target, false);
+      const f = fade ?? false;
+      switch (action) {
+        case 'click':
+          this.engine.toggle(target);
+          break;
+        case 'start':
+          this.engine.start(target, f, true);
+          break;
+        case 'pause':
+          this.engine.pause(target, f);
+          break;
+        case 'resume':
+          this.engine.resume(target, f);
+          break;
+        case 'stop':
+          this.engine.stop(target, f, 'stop');
+          break;
+      }
     } else if (target.type === 'http') {
-      if (action !== 'stop') this.fireHttp(target);
+      this.fireHttp(target);
     } else if (target.type === 'timer') {
-      if (action !== 'stop') this.runTimerCue(target);
+      if (action === 'click') {
+        this.runTimerCue(target);
+      } else if (action === 'set' || action === 'pause' || action === 'resume' || action === 'clear') {
+        this.applyTimerAction(target, action);
+        this.fireTriggers(target.id, 'onStart');
+      }
     }
   }
 
-  private runTimerCue(cue: TimerCue): void {
-    switch (cue.action) {
+  private applyTimerAction(cue: TimerCue, action: TimerAction): void {
+    switch (action) {
       case 'set':
+        this.timerCueId = cue.id;
         this.setTimer(cue.duration);
         break;
       case 'pause':
@@ -368,6 +396,10 @@ export class AppState {
         this.clearTimer();
         break;
     }
+  }
+
+  private runTimerCue(cue: TimerCue): void {
+    this.applyTimerAction(cue, cue.action);
     // Timer cues can also chain onStart triggers.
     this.fireTriggers(cue.id, 'onStart');
   }
@@ -381,7 +413,7 @@ export class AppState {
       if (!target) continue;
       const effective = this.resolveProxy(target);
       if (!effective || this.firing.has(effective.id)) continue;
-      this.performAction(effective, trig.action);
+      this.performAction(effective, trig.action, trig.fade);
     }
   }
 
@@ -468,6 +500,7 @@ export class AppState {
     this.timer.remaining = 0;
     this.timer.running = false;
     this.timer.finished = false;
+    this.timerCueId = null;
     this.stopTimerInterval();
     this.renderTimer();
   }
@@ -487,6 +520,9 @@ export class AppState {
       this.timer.running = false;
       this.timer.finished = true;
       this.stopTimerInterval();
+      const cueId = this.timerCueId;
+      this.timerCueId = null;
+      if (cueId) this.propagate(() => this.fireTriggers(cueId, 'onStop'));
     }
     this.renderTimer();
   }

@@ -2,9 +2,14 @@
 // through a fresh AudioBufferSourceNode -> per-cue GainNode -> masterGain, with
 // sample-accurate fades. This keeps click-to-sound latency near zero.
 
-import type { AudioCue, PlaybackState } from '../types';
+import type { AudioCue, PlaybackState, TriggerEvent } from '../types';
 
-type CueEvent = 'onStart' | 'onStop';
+type CueEvent = TriggerEvent;
+
+/** How a stop resolves the resume position: 'auto' respects the cue's own
+ *  onStopBehavior (plain click/toggle); 'pause'/'stop' force it either way
+ *  (explicit trigger actions). */
+type StopMode = 'auto' | 'pause' | 'stop';
 
 interface Playback {
   source: AudioBufferSourceNode;
@@ -23,6 +28,8 @@ interface Playback {
   stopTimer: number | null;
   /** A deliberate stop/pause was requested (vs. a natural end). */
   stopping: boolean;
+  /** Resolved intent of the deliberate stop, set by stop(); see StopMode. */
+  stopMode: StopMode;
   finalized: boolean;
 }
 
@@ -196,7 +203,7 @@ export class AudioEngine {
   }
 
   /** Must be called from a user gesture; browsers start the context suspended. */
-  resume(): Promise<void> {
+  resumeContext(): Promise<void> {
     if (this.ctx.state === 'suspended') return this.ctx.resume();
     return Promise.resolve();
   }
@@ -277,11 +284,14 @@ export class AudioEngine {
     this.onStateChange?.(pb.cue.id, state);
   }
 
-  /** Start (or restart) a cue. `fade` false => instant full volume (trigger use). */
-  start(cue: AudioCue, fade = true): void {
+  /** Start (or restart) a cue. `fade` false => instant full volume (trigger use).
+   *  `fresh` true => ignore any saved paused position, always start at cue.startTime
+   *  (used by the explicit "Start" trigger action; click/toggle and resume() keep
+   *  `fresh = false`, i.e. auto-resume if there's a saved position). */
+  start(cue: AudioCue, fade = true, fresh = false): void {
     const buffer = this.buffers.get(cue.id);
     if (!buffer) return;
-    void this.resume();
+    void this.resumeContext();
 
     // Restart cleanly if already playing.
     if (this.active.has(cue.id)) this.hardStop(cue.id);
@@ -289,7 +299,7 @@ export class AudioEngine {
     const now = this.ctx.currentTime;
     const end = cue.endTime ?? buffer.duration;
 
-    let offset = this.paused.get(cue.id) ?? cue.startTime;
+    let offset = fresh ? cue.startTime : (this.paused.get(cue.id) ?? cue.startTime);
     if (offset < cue.startTime || offset >= end) offset = cue.startTime;
     this.paused.delete(cue.id);
 
@@ -336,6 +346,7 @@ export class AudioEngine {
       fadeInTimer: null,
       stopTimer: null,
       stopping: false,
+      stopMode: 'auto',
       finalized: false,
     };
     this.active.set(cue.id, pb);
@@ -358,12 +369,15 @@ export class AudioEngine {
     this.onCueEvent?.(cue.id, 'onStart');
   }
 
-  /** Stop a cue. `fade` false => instant stop (trigger use). */
-  stop(cue: AudioCue, fade = true): void {
+  /** Stop a cue. `fade` false => instant stop (trigger use).
+   *  `mode`: 'auto' (click/toggle) respects the cue's own onStopBehavior; 'pause'/
+   *  'stop' force the resume-position handling either way (explicit trigger actions). */
+  stop(cue: AudioCue, fade = true, mode: StopMode = 'auto'): void {
     const pb = this.active.get(cue.id);
     if (!pb || pb.finalized) return;
     const firstStop = !pb.stopping;
     pb.stopping = true;
+    pb.stopMode = mode;
     const now = this.ctx.currentTime;
     const fadeOutSec = fade ? cue.fadeOut : 0;
 
@@ -388,9 +402,23 @@ export class AudioEngine {
       this.finalize(pb, 'stopped');
     }
 
-    // Fire onStop the moment a stop/pause is requested (not after the fade),
-    // once per stop. State/teardown are already set above so re-entrancy is safe.
-    if (firstStop) this.onCueEvent?.(cue.id, 'onStop');
+    // Fire the moment a stop/pause is requested (not after the fade), once per
+    // stop. State/teardown are already set above so re-entrancy is safe.
+    if (firstStop) {
+      const willPause = mode === 'pause' || (mode === 'auto' && cue.onStopBehavior === 'pause');
+      this.onCueEvent?.(cue.id, willPause ? 'onPause' : 'onStop');
+    }
+  }
+
+  /** Explicit pause: always saves the resume position, regardless of onStopBehavior. */
+  pause(cue: AudioCue, fade = true): void {
+    this.stop(cue, fade, 'pause');
+  }
+
+  /** Continue from a saved paused position. No-op if nothing is paused. */
+  resume(cue: AudioCue, fade = true): void {
+    if (!this.paused.has(cue.id)) return;
+    this.start(cue, fade, false);
   }
 
   toggle(cue: AudioCue): void {
@@ -425,9 +453,11 @@ export class AudioEngine {
 
     const id = pb.cue.id;
 
-    // Save resume position when this was a deliberate pause-stop, regardless of
-    // whether the fade timer or the source's onended reached finalize first.
-    if (pb.stopping && pb.cue.onStopBehavior === 'pause') {
+    // Save resume position when this was a deliberate pause (explicit, or 'auto'
+    // deferring to the cue's own onStopBehavior), regardless of whether the fade
+    // timer or the source's onended reached finalize first.
+    const willPause = pb.stopMode === 'pause' || (pb.stopMode === 'auto' && pb.cue.onStopBehavior === 'pause');
+    if (pb.stopping && willPause) {
       this.paused.set(id, this.getPosition(pb.cue));
     } else {
       this.paused.delete(id);
@@ -444,9 +474,9 @@ export class AudioEngine {
     this.active.delete(id);
 
     this.setState(pb, 'idle');
-    // A deliberate stop already fired onStop in stop(); only fire here for a
-    // natural end (the cue reaching its out point on its own).
-    if (reason === 'natural') this.onCueEvent?.(id, 'onStop');
+    // A deliberate stop/pause already fired its event in stop(); only fire here
+    // for a natural end (the cue reaching its out point on its own).
+    if (reason === 'natural') this.onCueEvent?.(id, 'onEnd');
   }
 
   /** Stop everything and drop all decoded buffers (used on project reload). */

@@ -9,7 +9,7 @@
   let rect = $state<{ left: number; top: number; width: number } | null>(null);
 
   let selected = $derived(app.resolveRef(target));
-  let selectedTab = $derived(app.project?.tabs.find((t) => t.id === target.tab) ?? null);
+  let selectedTab = $derived(selected ? app.tabOf(selected) : null);
 
   let groups = $derived(
     (app.project?.tabs ?? []).map((t) => ({
@@ -24,10 +24,8 @@
     open = !open;
   }
 
-  function choose(tabId: string, cue: Cue) {
-    target.tab = tabId;
-    target.row = cue.row;
-    target.col = cue.col;
+  function choose(cue: Cue) {
+    target.cueId = cue.id;
     app.markDirty();
     open = false;
   }
@@ -69,7 +67,7 @@
           type="button"
           class="card"
           class:sel={selected?.id === cue.id}
-          onclick={() => choose(g.tab.id, cue)}
+          onclick={() => choose(cue)}
         >
           <span class="swatch" style:background={info.color}></span>
           <span class="name">{info.name || '(unnamed)'}</span>

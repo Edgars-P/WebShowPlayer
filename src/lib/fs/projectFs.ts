@@ -2,7 +2,7 @@
 // read/write them (native .wsp/.json plus best-effort .lsp import), and load
 // audio files from anywhere in the folder tree.
 
-import type { Project } from '../types';
+import type { CueRef, Project, ProxyCue } from '../types';
 import { defaultProject, PROJECT_VERSION } from '../types';
 import { convertLisp, looksLikeLisp } from './lisp';
 
@@ -91,6 +91,26 @@ export async function readCueFile(
   return { project, saveName };
 }
 
+/** Old CueRef shape (position-based), from before refs became id-based. */
+interface LegacyCueRef {
+  tab: string;
+  row: number;
+  col: number;
+}
+
+function isLegacyRef(r: unknown): r is LegacyCueRef {
+  return !!r && typeof r === 'object' && 'row' in r && 'col' in r && !('cueId' in r);
+}
+
+/** Migrate a possibly-old-shape ref to the current id-based CueRef. Unresolvable
+ *  (dangling) refs become the same "unset" state a fresh trigger already has. */
+function migrateRef(r: CueRef | LegacyCueRef, project: Project): CueRef {
+  if (!isLegacyRef(r)) return r;
+  const tab = project.tabs.find((t) => t.id === r.tab);
+  const found = tab?.cues.find((c) => c.row === r.row && c.col === r.col);
+  return { cueId: found?.id ?? '' };
+}
+
 /** Fill in missing/invalid fields so older or hand-edited files still load. */
 function normalizeProject(p: Partial<Project>): Project {
   const base = defaultProject();
@@ -103,6 +123,14 @@ function normalizeProject(p: Partial<Project>): Project {
   for (const tab of project.tabs) {
     if (!Array.isArray(tab.cues)) tab.cues = [];
     for (const cue of tab.cues) if (!Array.isArray(cue.triggers)) cue.triggers = [];
+  }
+  // Migrate any old position-based refs (triggers + proxy sources) to id-based,
+  // now that every cue's real id is known.
+  for (const tab of project.tabs) {
+    for (const cue of tab.cues) {
+      for (const trig of cue.triggers) trig.target = migrateRef(trig.target, project);
+      if (cue.type === 'proxy') (cue as ProxyCue).source = migrateRef((cue as ProxyCue).source, project);
+    }
   }
   return project;
 }

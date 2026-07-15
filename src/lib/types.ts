@@ -2,20 +2,22 @@
 
 export type CueType = 'audio' | 'proxy' | 'http' | 'timer';
 
-/** Address of another cue by tab id + grid position. */
+/** Durable address of another cue, by id — survives the cue being moved. */
 export interface CueRef {
-  tab: string;
-  row: number;
-  col: number;
+  cueId: string;
 }
 
-export type TriggerEvent = 'onStart' | 'onStop';
-export type TriggerAction = 'click' | 'start' | 'stop';
+export type TriggerEvent = 'onStart' | 'onPause' | 'onStop' | 'onEnd';
+export type TriggerAction = 'click' | 'start' | 'pause' | 'resume' | 'stop' | 'set' | 'clear';
 
 export interface Trigger {
   event: TriggerEvent;
   target: CueRef;
   action: TriggerAction;
+  /** Use the target's configured fade for start/pause/resume/stop. Ignored for
+   *  click/set/clear. Absent (legacy saves) reads as false, matching the previous
+   *  always-instant trigger behavior. */
+  fade?: boolean;
 }
 
 interface BaseCue {
@@ -111,10 +113,8 @@ export type PlaybackState = 'idle' | 'fadingIn' | 'playing' | 'fadingOut';
 
 // ---- Defaults / factories ------------------------------------------------
 
-let idCounter = 0;
 export function makeId(prefix: string): string {
-  idCounter += 1;
-  return `${prefix}-${Date.now().toString(36)}-${idCounter}`;
+  return `${prefix}-${crypto.randomUUID()}`;
 }
 
 export function defaultProject(): Project {
@@ -153,7 +153,7 @@ export function defaultProxyCue(row: number, col: number): ProxyCue {
     row,
     col,
     triggers: [],
-    source: { tab: '', row: 0, col: 0 },
+    source: { cueId: '' },
   };
 }
 
