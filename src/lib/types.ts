@@ -43,9 +43,10 @@ export interface AudioCue extends BaseCue {
   /** Fade-out duration in seconds. */
   fadeOut: number;
   /**
-   * User trim, 0..1. Defaults to 0.5 so there's headroom above/below the
-   * loudness-matched level. Effective gain = volume * the file's normalization
-   * gain (measured per file by the engine, not stored on the cue).
+   * User trim, 0..2. Defaults to 1 (100%), which is the loudness-matched
+   * level; raise toward 2 (200%) to boost or lower toward 0 to attenuate.
+   * Effective gain = volume * the file's normalization gain (measured per
+   * file by the engine, not stored on the cue).
    */
   volume: number;
   loop: boolean;
@@ -139,7 +140,7 @@ export function defaultAudioCue(row: number, col: number): AudioCue {
     endTime: null,
     fadeIn: 0,
     fadeOut: 0.5,
-    volume: 0.5,
+    volume: 1,
     loop: false,
     onStopBehavior: 'stop',
   };

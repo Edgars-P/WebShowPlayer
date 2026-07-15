@@ -115,8 +115,8 @@
           </div>
           <div class="field">
             <label>Volume: {Math.round(c.volume * 100)}%</label>
-            <input type="range" min="0" max="1" step="0.01" bind:value={c.volume} oninput={() => app.markDirty()} />
-            <span class="hint">50% = loudness-matched on import; raise or lower to taste.</span>
+            <input type="range" min="0" max="2" step="0.01" bind:value={c.volume} oninput={() => app.markDirty()} />
+            <span class="hint">100% = loudness-matched on import; raise or lower to taste.</span>
           </div>
           <div class="grid2">
             <label class="check">
