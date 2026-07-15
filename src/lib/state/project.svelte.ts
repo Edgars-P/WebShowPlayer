@@ -230,7 +230,7 @@ export class AppState {
         // Point the cue at the actual file found in the folder tree.
         if (resolved !== cue.file) cue.file = resolved;
         try {
-          await this.engine.decode(cue.id, await loadAudioBytes(this.dir, resolved));
+          await this.engine.decode(cue.id, resolved, await loadAudioBytes(this.dir, resolved));
         } catch (err) {
           console.warn(`Failed to load "${resolved}":`, err);
         }
@@ -239,12 +239,15 @@ export class AppState {
     }
   }
 
-  /** Decode a single cue's file (after adding/changing it). */
+  /** Decode a single cue's file (after adding/changing it). The engine measures
+   * the file's loudness-normalization gain the first time it sees the path. */
   async reloadCueAudio(cue: AudioCue): Promise<void> {
     if (!this.dir || !cue.file) return;
     const resolved = this.resolveAudioPath(cue.file) ?? cue.file;
+    // Point the cue at the real path so its gain key matches the decoded file.
+    if (resolved !== cue.file) cue.file = resolved;
     try {
-      await this.engine.decode(cue.id, await loadAudioBytes(this.dir, resolved));
+      await this.engine.decode(cue.id, resolved, await loadAudioBytes(this.dir, resolved));
     } catch (err) {
       console.warn(`Failed to load "${resolved}":`, err);
     }

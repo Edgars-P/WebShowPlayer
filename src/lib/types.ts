@@ -42,7 +42,11 @@ export interface AudioCue extends BaseCue {
   fadeIn: number;
   /** Fade-out duration in seconds. */
   fadeOut: number;
-  /** Per-cue gain, 0..1. */
+  /**
+   * User trim, 0..1. Defaults to 0.5 so there's headroom above/below the
+   * loudness-matched level. Effective gain = volume * the file's normalization
+   * gain (measured per file by the engine, not stored on the cue).
+   */
   volume: number;
   loop: boolean;
   /** On stop: reset to startTime ("stop") or keep position to resume ("pause"). */
@@ -135,7 +139,7 @@ export function defaultAudioCue(row: number, col: number): AudioCue {
     endTime: null,
     fadeIn: 0,
     fadeOut: 0.5,
-    volume: 1,
+    volume: 0.5,
     loop: false,
     onStopBehavior: 'stop',
   };
