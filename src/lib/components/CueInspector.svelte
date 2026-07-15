@@ -9,13 +9,25 @@
     TimerAction,
     TimerCue,
   } from '../types';
+  import CuePicker from './CuePicker.svelte';
   import TriggerEditor from './TriggerEditor.svelte';
 
   let cue = $derived(app.propertiesCue);
-  let tabs = $derived(app.project?.tabs ?? []);
 
   function close() {
     app.closeProperties();
+  }
+
+  // Only close on a genuine click on the overlay itself; a mousedown inside
+  // the dialog that drags (e.g. text selection) out over the overlay would
+  // otherwise fire a "click" on the overlay too.
+  let overlayMouseDown = false;
+  function onOverlayMouseDown(e: MouseEvent) {
+    overlayMouseDown = e.target === e.currentTarget;
+  }
+  function onOverlayClick(e: MouseEvent) {
+    if (overlayMouseDown && e.target === e.currentTarget) close();
+    overlayMouseDown = false;
   }
 
   function onFileChange(c: AudioCue, file: string) {
@@ -49,11 +61,12 @@
 {#if cue}
   <div
     class="overlay"
-    onclick={close}
+    onmousedown={onOverlayMouseDown}
+    onclick={onOverlayClick}
     onkeydown={(e) => e.key === 'Escape' && close()}
     role="presentation"
   >
-    <div class="dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+    <div class="dialog" role="dialog" aria-modal="true">
       <header>
         <h3>{cue.type.toUpperCase()} cue — row {cue.row}, col {cue.col}</h3>
         <button class="close" title="Close" onclick={close}>×</button>
@@ -121,24 +134,9 @@
           {@const c = cue as ProxyCue}
           <p class="hint">Mirrors another cue and controls the same instance.</p>
           <div class="field">
-            <label>Source tab</label>
-            <select bind:value={c.source.tab} onchange={() => app.markDirty()}>
-              {#each tabs as t (t.id)}
-                <option value={t.id}>{t.name}</option>
-              {/each}
-            </select>
+            <label>Source</label>
+            <CuePicker target={c.source} />
           </div>
-          <div class="grid2">
-            <div class="field">
-              <label>Source row</label>
-              <input type="number" min="0" bind:value={c.source.row} onchange={() => app.markDirty()} />
-            </div>
-            <div class="field">
-              <label>Source col</label>
-              <input type="number" min="0" bind:value={c.source.col} onchange={() => app.markDirty()} />
-            </div>
-          </div>
-          <div class="hint">→ {app.display(c).missing ? 'unresolved' : app.display(c).name}</div>
         {:else if cue.type === 'timer'}
           {@const c = cue as TimerCue}
           <p class="hint">Controls the single global timer slot.</p>
