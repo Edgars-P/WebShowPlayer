@@ -8,6 +8,14 @@ export interface TimerView {
   remaining: number;
   running: boolean;
   finished: boolean;
+  /**
+   * Wall-clock timestamp (`Date.now()` epoch ms) at which the countdown reaches
+   * zero, or null when not running. Opener and pop-out share a machine clock, so
+   * the pop-out can derive a smooth, always-accurate `remaining` from this each
+   * animation frame instead of depending on how often the (often background-
+   * throttled) opener pushes snapshots. Ignored unless `running` is true.
+   */
+  endsAt?: number | null;
 }
 
 export interface TimerBridge {

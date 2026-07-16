@@ -7,12 +7,35 @@
 
   let view = $state<TimerView>({ duration: 0, remaining: 0, running: false, finished: false });
 
+  // While running, we don't trust the (background-throttled) opener's push cadence
+  // for the displayed value — we recompute `remaining` from the shared wall clock
+  // every animation frame. This keeps the number and bar smooth and always in sync,
+  // regardless of how sparsely snapshots arrive. `now` ticks only while running.
+  let now = $state(Date.now());
+  $effect(() => {
+    if (!view.running || view.endsAt == null) return;
+    let raf = 0;
+    const loop = () => {
+      now = Date.now();
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  });
+
+  // Effective, frame-accurate remaining: derived from the end timestamp when
+  // running, otherwise the frozen value the opener last pushed (pause/finish).
+  let remaining = $derived(
+    view.running && view.endsAt != null ? Math.max(0, (view.endsAt - now) / 1000) : view.remaining,
+  );
+  let effective = $derived<TimerView>({ ...view, remaining });
+
   let clear = $derived(view.duration <= 0 && !view.finished);
   let paused = $derived(!clear && !view.finished && !view.running);
-  let color = $derived(timerColor(view));
+  let color = $derived(timerColor(effective));
   // timerColor's hue: 120 (green) → 0 (red). Only the red tail should glow, ramping
   // in as tension builds — no glow at all while still green/yellow.
-  let hue = $derived(120 * remainingFraction(view));
+  let hue = $derived(120 * remainingFraction(effective));
   let glow = $derived(view.finished ? 1 : Math.max(0, 1 - hue / 35));
   let glowShadow = $derived(
     glow > 0 ? `0 0 ${(1 + glow * 5).toFixed(2)}vh rgba(255, 50, 50, ${(0.15 + glow * 5).toFixed(2)})` : 'none',
@@ -39,14 +62,13 @@
       in:scale={{ duration: 450, start: 0.7 }}
       out:scale={{ duration: 450, start: 0.7 }}
     >
-      {formatTime(view.remaining)}
+      {formatTime(effective.remaining)}
     </div>
     <div class="track" in:scale={{ duration: 450, start: 0.7 }} out:scale={{ duration: 450, start: 0.7 }}>
       <div
         class="bar"
         style:background={color}
-        style:box-shadow={`0 0 1.4vh ${color}`}
-        style:width={`${remainingFraction(view) * 100}%`}
+        style:transform={`scaleX(${remainingFraction(effective)})`}
       ></div>
     </div>
   {/if}
@@ -70,7 +92,7 @@
     align-items: center;
     justify-content: center;
     background: #000;
-    font-family: 'Segoe UI', system-ui, sans-serif;
+    font-family: 'Bahnschrift', system-ui, sans-serif;
   }
 
   .time {
@@ -78,7 +100,6 @@
     font-weight: 700;
     font-size: min(26vw, 46vh);
     line-height: 1;
-    letter-spacing: 0.02em;
     transition: color 0.3s ease, text-shadow 0.3s ease, opacity 0.3s ease, transform 0.3s ease;
   }
 
@@ -96,10 +117,17 @@
 
   .bar {
     height: 100%;
+    width: 100%;
     border-radius: inherit;
-    /* Continuous property changes (width tracking the countdown) stay CSS-driven;
-       only mount/unmount of the track uses the Svelte transition above. */
-    transition: width 0.2s linear, background 0.3s ease, box-shadow 0.3s ease;
+    /* The bar is scaled (not resized) per frame by requestAnimationFrame (see the
+       TimerPage script). transform: scaleX is a compositor-only property, so each
+       frame skips layout and paint entirely — the GPU just re-composites the
+       existing layer. Animating `width` instead would force a full layout+paint on
+       every frame. Default transform-origin (centre) keeps the old symmetric shrink.
+       The scale itself must apply instantly, so only colour eases. */
+    transform-origin: center;
+    transition: background 0.3s ease;
+    will-change: transform;
   }
 
   /* Paused: clearly dimmed, but still on-screen. */

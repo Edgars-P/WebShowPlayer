@@ -475,6 +475,7 @@ export class AppState {
     this.timer.finished = false;
     this.timer.running = true;
     this.timerEndsAt = Date.now() + dur * 1000;
+    this.timer.endsAt = this.timerEndsAt;
     this.startTimerInterval();
     this.renderTimer();
   }
@@ -483,6 +484,7 @@ export class AppState {
     if (!this.timer.running) return;
     this.timer.remaining = Math.max(0, (this.timerEndsAt - Date.now()) / 1000);
     this.timer.running = false;
+    this.timer.endsAt = null;
     this.stopTimerInterval();
     this.renderTimer();
   }
@@ -491,6 +493,7 @@ export class AppState {
     if (this.timer.running || this.timer.finished || this.timer.remaining <= 0) return;
     this.timer.running = true;
     this.timerEndsAt = Date.now() + this.timer.remaining * 1000;
+    this.timer.endsAt = this.timerEndsAt;
     this.startTimerInterval();
     this.renderTimer();
   }
@@ -500,6 +503,7 @@ export class AppState {
     this.timer.remaining = 0;
     this.timer.running = false;
     this.timer.finished = false;
+    this.timer.endsAt = null;
     this.timerCueId = null;
     this.stopTimerInterval();
     this.renderTimer();
@@ -519,6 +523,7 @@ export class AppState {
     if (rem <= 0) {
       this.timer.running = false;
       this.timer.finished = true;
+      this.timer.endsAt = null;
       this.stopTimerInterval();
       const cueId = this.timerCueId;
       this.timerCueId = null;
