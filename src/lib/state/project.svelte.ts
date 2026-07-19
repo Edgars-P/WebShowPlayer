@@ -440,6 +440,18 @@ export class AppState implements TimerHost {
   renameTab(id: string, name: string): void {
     this.activeDoc?.renameTab(id, name);
   }
+  moveTab(id: string, toIndex: number): void {
+    this.activeDoc?.moveTab(id, toIndex);
+  }
+  /** Move a cue to another tab; reports when the target tab has no room. */
+  moveCueToTab(cueId: string, tabId: string): void {
+    const moved = this.activeDoc?.moveCueToTab(cueId, tabId) ?? false;
+    if (!moved) {
+      this.errorMessage = 'That tab has no empty cell for the cue.';
+      return;
+    }
+    if (this.propertiesCueId === cueId) this.propertiesCueId = null;
+  }
 
   // ---- Global timer ------------------------------------------------------
 

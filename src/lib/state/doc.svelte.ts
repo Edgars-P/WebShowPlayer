@@ -684,6 +684,35 @@ export class Doc {
     this.markDirty();
   }
 
+  /**
+   * Move a cue into another tab, keeping its cell when that cell is free there
+   * and otherwise dropping it into the first empty one. Returns false if the
+   * target tab is full, in which case nothing moves.
+   *
+   * The cue keeps its id, so its decoded audio, triggers, and anything pointing
+   * at it all survive the move untouched.
+   */
+  moveCueToTab(cueId: string, tabId: string): boolean {
+    const target = this.project.tabs.find((t) => t.id === tabId);
+    const source = this.project.tabs.find((t) => t.cues.some((c) => c.id === cueId));
+    if (!target || !source) return false;
+    if (source.id === target.id) return true; // already there
+
+    const idx = source.cues.findIndex((c) => c.id === cueId);
+    const cue = source.cues[idx];
+    const cell = this.cueAt(target, cue.row, cue.col)
+      ? this.emptyCellsFrom(target, 0, 0, 1)[0]
+      : { row: cue.row, col: cue.col };
+    if (!cell) return false; // no room
+
+    source.cues.splice(idx, 1);
+    cue.row = cell.row;
+    cue.col = cell.col;
+    target.cues.push(cue);
+    this.markDirty();
+    return true;
+  }
+
   /** Copy a cue into an empty cell in the same tab. */
   copyCue(id: string, row: number, col: number): void {
     const tab = this.activeTab;
@@ -726,6 +755,17 @@ export class Doc {
     if (this.activeTabId === id) {
       this.activeTabId = this.project.tabs[Math.max(0, idx - 1)].id;
     }
+    this.markDirty();
+  }
+
+  /** Move a tab to a new position in the strip. */
+  moveTab(id: string, toIndex: number): void {
+    const from = this.project.tabs.findIndex((t) => t.id === id);
+    if (from < 0) return;
+    const to = Math.max(0, Math.min(this.project.tabs.length - 1, toIndex));
+    if (from === to) return;
+    const [tab] = this.project.tabs.splice(from, 1);
+    this.project.tabs.splice(to, 0, tab);
     this.markDirty();
   }
 

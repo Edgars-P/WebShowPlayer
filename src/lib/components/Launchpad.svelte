@@ -56,10 +56,14 @@
     const cue = app.cueAt(tab, row, col);
     let items: MenuItem[];
     if (cue) {
-      items = [
-        { label: 'Properties…', action: () => app.openProperties(cue.id) },
-        { label: 'Delete cue', danger: true, action: () => app.removeCue(cue.id) },
-      ];
+      items = [{ label: 'Properties…', action: () => app.openProperties(cue.id) }];
+      // Dragging onto a tab does the same thing, but needs a modifier held and
+      // isn't discoverable; this is the obvious path.
+      for (const t of project?.tabs ?? []) {
+        if (t.id === tab.id) continue;
+        items.push({ label: `Move to “${t.name}”`, action: () => app.moveCueToTab(cue.id, t.id) });
+      }
+      items.push({ label: 'Delete cue', danger: true, action: () => app.removeCue(cue.id) });
     } else {
       items = [
         { label: 'Add audio cue', action: () => app.addNewCue('audio', row, col) },
