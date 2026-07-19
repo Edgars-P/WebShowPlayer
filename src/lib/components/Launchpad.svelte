@@ -17,6 +17,17 @@
     return !!e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files');
   }
 
+  // Tiles are only draggable while Shift or Ctrl is held, so an ordinary click
+  // during a show can't nudge a cue out of place. `draggable` has to be set
+  // before the drag starts, hence tracking the modifiers rather than checking
+  // them in the handler.
+  function syncModifiers(e: KeyboardEvent | MouseEvent) {
+    app.dragModifier = e.shiftKey || e.ctrlKey;
+  }
+  function clearModifiers() {
+    app.dragModifier = false;
+  }
+
   async function onDrop(e: DragEvent, row: number, col: number) {
     e.preventDefault();
     hoverKey = null;
@@ -54,6 +65,7 @@
         { label: 'Add audio cue', action: () => app.addNewCue('audio', row, col) },
         { label: 'Add proxy cue', action: () => app.addNewCue('proxy', row, col) },
         { label: 'Add timer cue', action: () => app.addNewCue('timer', row, col) },
+        { label: 'Add global cue', action: () => app.addNewCue('global', row, col) },
         { label: 'Add HTTP cue', action: () => app.addNewCue('http', row, col) },
       ];
     }
@@ -61,12 +73,21 @@
   }
 </script>
 
+<svelte:window
+  onkeydown={syncModifiers}
+  onkeyup={syncModifiers}
+  onblur={clearModifiers}
+/>
+
 {#if project && tab}
   <div
     class="grid"
+    class:dragready={app.dragModifier}
     style:grid-template-columns={`repeat(${project.grid.cols}, 1fr)`}
     style:grid-template-rows={`repeat(${project.grid.rows}, 1fr)`}
     ondragleave={() => (hoverKey = null)}
+    onmouseleave={() => (app.hoveredCueId = null)}
+    onmousemove={syncModifiers}
   >
     {#each cells(project.grid.rows, project.grid.cols) as cell (cell.row + '-' + cell.col)}
       {@const cue = app.cueAt(tab, cell.row, cell.col)}
@@ -84,6 +105,7 @@
         {:else}
           <div class="empty" title="Right-click to add a cue"></div>
         {/if}
+
       </div>
     {/each}
   </div>
@@ -114,5 +136,12 @@
   .empty {
     width: 100%;
     height: 100%;
+  }
+  /* Signals that tiles can be picked up while the modifier is held. */
+  .grid.dragready :global(.cue) {
+    cursor: grab;
+  }
+  .grid.dragready :global(.cue:active) {
+    cursor: grabbing;
   }
 </style>

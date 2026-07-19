@@ -2,6 +2,9 @@
   import { app } from '../state/project.svelte';
   import type {
     AudioCue,
+    GlobalAction,
+    GlobalCue,
+    GlobalScope,
     HttpCue,
     HttpMethod,
     ProxyCue,
@@ -113,6 +116,28 @@
               <input type="number" min="0" step="0.1" bind:value={c.fadeOut} oninput={() => app.markDirty()} />
             </div>
           </div>
+          <label class="check">
+            <input
+              type="checkbox"
+              checked={c.fadeOutOnEnd ?? false}
+              disabled={c.loop || c.fadeOut <= 0}
+              onchange={(e) => {
+                c.fadeOutOnEnd = e.currentTarget.checked;
+                app.markDirty();
+              }}
+            />
+            Fade out at end too
+          </label>
+          <span class="hint">
+            {#if c.loop}
+              A looping cue never reaches its end, so this doesn't apply.
+            {:else if c.fadeOut <= 0}
+              Set a fade-out time above to enable this.
+            {:else}
+              Also fades over {c.fadeOut}s onto the {c.endTime == null ? 'end of the file' : 'end time'},
+              instead of cutting. The cue still ends at the same moment.
+            {/if}
+          </span>
           <div class="field">
             <label>Volume: {Math.round(c.volume * 100)}%</label>
             <input type="range" min="0" max="2" step="0.01" bind:value={c.volume} oninput={() => app.markDirty()} />
@@ -163,6 +188,48 @@
               <input type="number" min="0" step="1" bind:value={c.duration} oninput={() => app.markDirty()} />
             </div>
           {/if}
+        {:else if cue.type === 'global'}
+          {@const c = cue as GlobalCue}
+          <p class="hint">
+            Applies one action to every audio cue at once — no target needed. Cues that aren't
+            playing are left alone, and so is whatever set this off: a jingle whose
+            <em>on start</em> runs this cue ducks the show and keeps playing itself.
+          </p>
+          <div class="field">
+            <label>Name</label>
+            <input bind:value={c.name} oninput={() => app.markDirty()} placeholder="(unnamed)" />
+          </div>
+          <div class="field">
+            <label>Colour</label>
+            <input type="color" bind:value={c.color} oninput={() => app.markDirty()} />
+          </div>
+          <div class="field">
+            <label>Action</label>
+            <select bind:value={c.action} onchange={() => app.markDirty()}>
+              <option value={'stop' as GlobalAction}>Stop all</option>
+              <option value={'pause' as GlobalAction}>Pause all</option>
+              <option value={'resume' as GlobalAction}>Resume all</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Scope</label>
+            <select bind:value={c.scope} onchange={() => app.markDirty()}>
+              <option value={'document' as GlobalScope}>This cue file</option>
+              <option value={'all' as GlobalScope}>Every open cue file</option>
+            </select>
+            {#if c.scope === 'all'}
+              <span class="hint">Reaches into other open tabs too — a true panic button.</span>
+            {/if}
+          </div>
+          <label class="check">
+            <input type="checkbox" bind:checked={c.fade} onchange={() => app.markDirty()} />
+            Use each cue's own fade
+          </label>
+          <span class="hint">
+            {c.fade
+              ? 'Each cue fades out over its own configured fade time.'
+              : 'Everything stops instantly, ignoring fade settings.'}
+          </span>
         {:else if cue.type === 'http'}
           {@const c = cue as HttpCue}
           <div class="field">

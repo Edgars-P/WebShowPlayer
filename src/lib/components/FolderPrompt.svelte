@@ -22,8 +22,8 @@
       <button class="primary big" onclick={() => app.openFolder()} disabled={app.status === 'loading'}>
         {app.status === 'loading' ? 'Loading…' : 'Open project folder'}
       </button>
-      {#if app.status === 'loading' && app.loadProgress.total > 0}
-        <p class="sub">Decoding audio {app.loadProgress.done}/{app.loadProgress.total}…</p>
+      {#if app.status === 'loading' && app.progressView.total > 0}
+        <p class="sub">Decoding audio {app.progressView.done}/{app.progressView.total}…</p>
       {/if}
     {/if}
 

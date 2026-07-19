@@ -5,6 +5,10 @@
   let project = $derived(app.project);
   let timer = $derived(app.timer);
   let timerActive = $derived(timer.duration > 0 || timer.finished);
+  let progress = $derived(app.progressView);
+  let memory = $derived(app.audioMemory);
+
+  const gb = (bytes: number) => (bytes / 1024 ** 3).toFixed(2);
 </script>
 
 {#if project}
@@ -12,13 +16,22 @@
     <div class="row">
       <strong class="brand">Show Player</strong>
       <button class="ghost" onclick={() => app.openFolder()}>Open…</button>
-      {#if app.cueFiles.length > 1}
-        <button class="ghost" title="Switch cue file" onclick={() => app.showChooser()}>Files…</button>
-      {/if}
+      <button class="ghost" title="Open or create a cue file" onclick={() => app.showChooser()}>Files…</button>
       <button class="ghost" onclick={() => app.save()} disabled={!app.dirty} title={`Save to ${app.saveName}`}>
         Save{app.dirty ? ' *' : ''}
       </button>
       <span class="file" title="Current cue file">{app.saveName}</span>
+      {#if progress.total > 0 && progress.done < progress.total}
+        <span class="file">decoding {progress.done}/{progress.total}…</span>
+      {:else if memory.files > 0}
+        <span
+          class="file"
+          class:heavy={memory.bytes > 2 * 1024 ** 3}
+          title={`${memory.files} distinct audio files decoded to raw PCM across all open documents.\nEach cue holding a file keeps it resident; identical files are shared, not duplicated.`}
+        >
+          {gb(memory.bytes)} GB audio
+        </span>
+      {/if}
     </div>
 
     <div class="row">
@@ -65,6 +78,25 @@
     </div>
 
     <div class="row">
+      <button
+        class="ghost stopall"
+        title="Fade out everything in every open cue file, using each cue's own fade time"
+        disabled={!app.anyPlaying}
+        onclick={() => app.stopAllAudio(true)}
+      >
+        Fade out all
+      </button>
+      <button
+        class="ghost stopall danger"
+        title="Stop everything in every open cue file immediately, ignoring fades"
+        disabled={!app.anyPlaying}
+        onclick={() => app.stopAllAudio(false)}
+      >
+        ⏹ Stop all
+      </button>
+    </div>
+
+    <div class="row">
       <label>Master</label>
       <input
         type="range"
@@ -97,6 +129,9 @@
     font-size: 12px;
     margin-left: 2px;
   }
+  .file.heavy {
+    color: var(--warn);
+  }
   .num {
     width: 52px;
   }
@@ -112,5 +147,15 @@
   }
   .icon {
     padding: 4px 8px;
+  }
+  .stopall:not(:disabled) {
+    border-color: var(--border);
+  }
+  .stopall.danger:not(:disabled) {
+    color: var(--danger);
+    border-color: var(--danger);
+  }
+  .stopall:disabled {
+    opacity: 0.4;
   }
 </style>

@@ -23,6 +23,7 @@
       { value: 'onStop', label: 'After it runs out' },
     ],
     http: [{ value: 'onStart', label: 'After it fires' }],
+    global: [{ value: 'onStart', label: 'After it runs' }],
   };
 
   interface ActionOption {
@@ -46,6 +47,8 @@
     { value: 'clear', label: 'Clear' },
   ];
   const HTTP_ACTIONS: ActionOption[] = [{ value: 'click', label: 'Fire request' }];
+  // A global cue carries its own action and scope, so a trigger just runs it.
+  const GLOBAL_ACTIONS: ActionOption[] = [{ value: 'click', label: 'Run (its own action)' }];
   const FALLBACK_ACTIONS: ActionOption[] = [{ value: 'click', label: 'Click' }];
 
   function actionsFor(target: CueRef): ActionOption[] {
@@ -54,6 +57,7 @@
     if (effective?.type === 'audio') return AUDIO_ACTIONS;
     if (effective?.type === 'timer') return TIMER_ACTIONS;
     if (effective?.type === 'http') return HTTP_ACTIONS;
+    if (effective?.type === 'global') return GLOBAL_ACTIONS;
     return FALLBACK_ACTIONS;
   }
 

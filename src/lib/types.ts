@@ -1,6 +1,6 @@
 // Data model for the launchpad player. Cues are a discriminated union on `type`.
 
-export type CueType = 'audio' | 'proxy' | 'http' | 'timer';
+export type CueType = 'audio' | 'proxy' | 'http' | 'timer' | 'global';
 
 /** Durable address of another cue, by id — survives the cue being moved. */
 export interface CueRef {
@@ -45,6 +45,14 @@ export interface AudioCue extends BaseCue {
   /** Fade-out duration in seconds. */
   fadeOut: number;
   /**
+   * Also fade out when the cue reaches its own out point (end of file, or
+   * `endTime`), not just when something stops it. The fade lands exactly on the
+   * out point, so the clip still ends when it always did — it just doesn't cut.
+   * Ignored while looping, which never reaches an end. Absent (older saves)
+   * reads as false, preserving the previous hard-cut behaviour.
+   */
+  fadeOutOnEnd?: boolean;
+  /**
    * User trim, 0..2. Defaults to 1 (100%), which is the loudness-matched
    * level; raise toward 2 (200%) to boost or lower toward 0 to attenuate.
    * Effective gain = volume * the file's normalization gain (measured per
@@ -86,7 +94,31 @@ export interface TimerCue extends BaseCue {
   duration: number;
 }
 
-export type Cue = AudioCue | ProxyCue | HttpCue | TimerCue;
+/**
+ * What a global cue does to every audio cue in scope. These mirror the
+ * equivalent trigger actions, but need no target — the target is "everything".
+ */
+export type GlobalAction = 'stop' | 'pause' | 'resume';
+
+/**
+ * How wide a global cue reaches. Documents are separate shows, so stopping
+ * "everything" normally means everything in *this* file; 'all' is the panic
+ * button that reaches across every open document too.
+ */
+export type GlobalScope = 'document' | 'all';
+
+/** Applies one action to every audio cue in scope at once. */
+export interface GlobalCue extends BaseCue {
+  type: 'global';
+  name: string;
+  color: string;
+  action: GlobalAction;
+  /** Use each affected cue's own configured fade, rather than acting instantly. */
+  fade: boolean;
+  scope: GlobalScope;
+}
+
+export type Cue = AudioCue | ProxyCue | HttpCue | TimerCue | GlobalCue;
 
 export interface Tab {
   id: string;
@@ -140,6 +172,7 @@ export function defaultAudioCue(row: number, col: number): AudioCue {
     endTime: null,
     fadeIn: 0,
     fadeOut: 0.5,
+    fadeOutOnEnd: false,
     volume: 1,
     loop: false,
     onStopBehavior: 'stop',
@@ -168,6 +201,21 @@ export function defaultTimerCue(row: number, col: number): TimerCue {
     color: '#8b5cf6',
     action: 'set',
     duration: 300,
+  };
+}
+
+export function defaultGlobalCue(row: number, col: number): GlobalCue {
+  return {
+    id: makeId('cue'),
+    type: 'global',
+    row,
+    col,
+    triggers: [],
+    name: 'Stop all',
+    color: '#ef4444',
+    action: 'stop',
+    fade: true,
+    scope: 'document',
   };
 }
 

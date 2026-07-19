@@ -1,44 +1,26 @@
-// Central app state (Svelte 5 runes) plus the cue-action dispatcher and trigger
-// engine. Holds the reactive Project and delegates audio to AudioEngine.
+// Central app state (Svelte 5 runes). Owns the list of open documents (one per
+// cue file), the folders they came from, and the genuinely global bits: the
+// countdown timer, the context menu, and the properties modal.
+//
+// Most members here just forward to the active document, so components can keep
+// saying `app.project` / `app.markDirty()` without knowing that several
+// documents may be open at once.
 
-import { AudioEngine } from '../audio/AudioEngine';
+import { audioCache } from '../audio/sharedAudio';
 import {
+  cueFileNameError,
   DEFAULT_CUE_FILE,
-  listAudioFiles,
-  listCueFiles,
-  loadAudioBytes,
+  normalizeCueFileName,
   pickProjectFolder,
   readCueFile,
-  writeCueFile,
-  writeMediaFile,
 } from '../fs/projectFs';
-import {
-  defaultAudioCue,
-  defaultHttpCue,
-  defaultProject,
-  defaultProxyCue,
-  defaultTimerCue,
-  makeId,
-  type AudioCue,
-  type Cue,
-  type CueRef,
-  type CueType,
-  type PlaybackState,
-  type Project,
-  type Tab,
-  type TimerAction,
-  type TimerCue,
-  type Trigger,
-  type TriggerAction,
-} from '../types';
+import { defaultProject, type Cue, type Tab, type TriggerAction } from '../types';
 import { TimerWindow, type TimerView } from '../timer/timer';
+import { Doc, type CueDisplay, type TriggerHint, type TimerHost } from './doc.svelte';
+import { Folder } from './folder.svelte';
 
 export type AppStatus = 'empty' | 'loading' | 'choosing' | 'ready' | 'error';
-
-export interface HttpFlash {
-  state: 'firing' | 'ok' | 'error';
-  at: number;
-}
+export type { CueDisplay, HttpFlash } from './doc.svelte';
 
 export interface MenuItem {
   label: string;
@@ -52,82 +34,276 @@ export interface ContextMenuState {
   items: MenuItem[];
 }
 
-export class AppState {
+export class AppState implements TimerHost {
   status = $state<AppStatus>('empty');
   errorMessage = $state('');
+  /** Progress of a folder-level open, before a document exists to own it. */
   loadProgress = $state({ done: 0, total: 0 });
 
-  project = $state<Project | null>(null);
-  audioFiles = $state<string[]>([]);
-  /** Cue files found in the folder root (for the chooser). */
-  cueFiles = $state<string[]>([]);
-  /** Name of the currently loaded cue file (null for a new unsaved one). */
-  currentFileName = $state<string | null>(null);
-  /** File name that Save writes to. */
-  saveName = $state(DEFAULT_CUE_FILE);
-  activeTabId = $state('');
+  /** Open documents, in tab order. */
+  docs = $state<Doc[]>([]);
+  activeDocId = $state('');
+  /** Folder whose cue files the chooser is currently offering. */
+  chooserFolder = $state<Folder | null>(null);
+
   /** Cue currently shown in the properties modal (null = closed). */
   propertiesCueId = $state<string | null>(null);
   /** Open right-click context menu (null = none). */
   contextMenu = $state<ContextMenuState | null>(null);
-  dirty = $state(false);
 
-  /** Playback state per audio cue id. */
-  playStates = $state<Record<string, PlaybackState>>({});
-  /** Transient HTTP fire feedback per cue id. */
-  httpFlashes = $state<Record<string, HttpFlash>>({});
-  /** Bumped by rAF while audio is playing so progress readouts stay live. */
-  tick = $state(0);
+  /** Tile the pointer is over, driving the trigger-chain preview. */
+  hoveredCueId = $state<string | null>(null);
+  /** Whether a drag-enabling modifier (Shift or Ctrl) is currently held. */
+  dragModifier = $state(false);
 
-  /** The single global countdown timer slot. */
+  /**
+   * Cues the hovered tile's triggers would act on right now, and with what
+   * action. Derived once here rather than per tile, so hovering is one pass
+   * over the hovered cue's triggers instead of one per cue in the grid.
+   */
+  previewTargets = $derived(
+    this.activeDoc?.previewTargets(this.hoveredCueId) ?? new Map<string, TriggerHint[]>(),
+  );
+
+  /** The single global countdown timer slot, shared by all documents. */
   timer = $state<TimerView>({ duration: 0, remaining: 0, running: false, finished: false });
+  /** Bumped whenever decoded-audio residency changes, so readouts can react. */
+  memoryVersion = $state(0);
 
-  private engine = new AudioEngine();
-  private dir: FileSystemDirectoryHandle | null = null;
-  private rafId = 0;
-
+  private folders: Folder[] = [];
   private timerEndsAt = 0;
   private timerInterval = 0;
   private timerWindow = new TimerWindow();
-  /** Id of the timer cue that last set the running countdown, so its onStop
-   *  triggers can fire when the timer runs out naturally. */
-  private timerCueId: string | null = null;
+  /** What to run when the countdown reaches zero on its own — set by whichever
+   *  document's timer cue last started it. */
+  private onTimerFinished: (() => void) | null = null;
 
-  // Trigger re-entrancy guard.
-  private firing = new Set<string>();
-  private propagating = 0;
+  // ---- Documents ---------------------------------------------------------
 
-  constructor() {
-    this.engine.onStateChange = (id, state) => {
-      this.playStates[id] = state;
-      if (state !== 'idle') this.ensureRaf();
-    };
-    this.engine.onCueEvent = (id, event) => {
-      this.propagate(() => this.fireTriggers(id, event));
-    };
+  get activeDoc(): Doc | null {
+    return this.docs.find((d) => d.id === this.activeDocId) ?? this.docs[0] ?? null;
   }
 
-  // ---- Derived accessors -------------------------------------------------
-
-  get activeTab(): Tab | null {
-    if (!this.project) return null;
-    return this.project.tabs.find((t) => t.id === this.activeTabId) ?? this.project.tabs[0] ?? null;
+  /** Every open document — used by global cues scoped to 'all'. */
+  eachDocument(fn: (doc: Doc) => void): void {
+    // Snapshot: a handler could in principle open or close a document.
+    for (const doc of [...this.docs]) fn(doc);
   }
 
-  get propertiesCue(): Cue | null {
-    if (!this.project || this.propertiesCueId == null) return null;
-    for (const tab of this.project.tabs) {
-      const found = tab.cues.find((c) => c.id === this.propertiesCueId);
-      if (found) return found;
+  /**
+   * Stop every audio cue in every open document — the toolbar's panic buttons.
+   * `fade` false cuts instantly; true lets each cue use its own fade-out time.
+   * Always reaches across documents: if you're hitting this, you want silence,
+   * not silence in the tab you happen to be looking at.
+   */
+  stopAllAudio(fade: boolean): void {
+    this.eachDocument((doc) => doc.applyToAllAudio('stop', fade));
+  }
+
+  /** Whether anything is currently making sound, in any document. */
+  get anyPlaying(): boolean {
+    return this.docs.some((d) => d.isPlaying);
+  }
+
+  selectDoc(id: string): void {
+    if (this.docs.some((d) => d.id === id)) {
+      this.activeDocId = id;
+      this.propertiesCueId = null;
+      this.contextMenu = null;
+    }
+  }
+
+  /** Close a document, releasing its audio. Returns false if the user cancelled. */
+  closeDoc(id: string): boolean {
+    const idx = this.docs.findIndex((d) => d.id === id);
+    if (idx < 0) return true;
+    const doc = this.docs[idx];
+    if (doc.dirty && !confirm(`"${doc.title}" has unsaved changes. Close it anyway?`)) {
+      return false;
+    }
+    doc.close();
+    this.docs.splice(idx, 1);
+    this.memoryVersion++;
+    if (this.activeDocId === doc.id) {
+      this.activeDocId = this.docs[Math.max(0, idx - 1)]?.id ?? '';
+      this.propertiesCueId = null;
+    }
+    if (this.docs.length === 0) this.status = 'empty';
+    return true;
+  }
+
+  /** Total decoded audio held across every open document. */
+  get audioMemory(): { files: number; bytes: number } {
+    void this.memoryVersion; // reactive dependency
+    return audioCache.stats();
+  }
+
+  // ---- Loading -----------------------------------------------------------
+
+  /** Reuse the Folder for a directory we already have open, if any. */
+  private async findFolder(dir: FileSystemDirectoryHandle): Promise<Folder | null> {
+    for (const folder of this.folders) {
+      if (await folder.dir.isSameEntry(dir)) return folder;
     }
     return null;
   }
 
-  cueAt(tab: Tab, row: number, col: number): Cue | undefined {
-    return tab.cues.find((c) => c.row === row && c.col === col);
+  /** Pick a folder and open its cue file, or show a chooser if there are several. */
+  async openFolder(): Promise<void> {
+    try {
+      this.status = 'loading';
+      this.errorMessage = '';
+      const opened = await pickProjectFolder();
+      let folder = await this.findFolder(opened.dir);
+      if (folder) {
+        folder.cueFiles = opened.cueFiles;
+        folder.audioFiles = opened.audioFiles;
+      } else {
+        folder = new Folder(opened.dir, opened.cueFiles, opened.audioFiles);
+        this.folders.push(folder);
+      }
+
+      if (opened.cueFiles.length === 0) {
+        // Nothing to open, so we're creating — which means naming it, same as
+        // the explicit "New cue file" action.
+        this.status = this.docs.length > 0 ? 'ready' : 'empty';
+        this.promptNewCueFile(folder);
+      } else if (opened.cueFiles.length === 1) {
+        await this.openCueFile(opened.cueFiles[0], folder);
+      } else {
+        this.chooserFolder = folder;
+        this.status = 'choosing';
+      }
+    } catch (err) {
+      this.status = this.docs.length > 0 ? 'ready' : 'error';
+      this.errorMessage = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  /** Open one of a folder's cue files as a new document tab. */
+  async openCueFile(name: string, folder = this.chooserFolder ?? this.activeDoc?.folder): Promise<void> {
+    if (!folder) return;
+    // Already open? Just switch to it rather than decoding a second copy.
+    const existing = this.docs.find((d) => d.folder === folder && d.currentFileName === name);
+    if (existing) {
+      this.selectDoc(existing.id);
+      this.chooserFolder = null;
+      this.status = 'ready';
+      return;
+    }
+    try {
+      this.status = 'loading';
+      this.errorMessage = '';
+      const { project, saveName } = await readCueFile(folder.dir, name);
+      const doc = new Doc(folder, project, saveName, this, name);
+      this.addDoc(doc);
+      this.chooserFolder = null;
+      this.status = 'ready';
+      await doc.decodeAll();
+      this.memoryVersion++;
+    } catch (err) {
+      this.status = this.docs.length > 0 ? 'ready' : 'error';
+      this.errorMessage = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  // ---- Creating a cue file ----------------------------------------------
+
+  /** Folder the new-file dialog is creating into (null = dialog closed). */
+  newFileFolder = $state<Folder | null>(null);
+  /** Name being typed in the new-file dialog. */
+  newFileName = $state('');
+
+  /** Open the "new cue file" dialog, pre-filled with an unused default name. */
+  promptNewCueFile(folder = this.chooserFolder ?? this.activeDoc?.folder ?? null): void {
+    if (!folder) return;
+    this.newFileFolder = folder;
+    this.newFileName = this.uniqueName(folder, DEFAULT_CUE_FILE);
+  }
+
+  /** Why the typed name is unusable, or null if it's fine. */
+  get newFileError(): string | null {
+    return cueFileNameError(this.newFileName);
+  }
+
+  /**
+   * Non-blocking warning about the typed name: it already exists on disk, or a
+   * document is already open on it. Saving will overwrite either way — that's
+   * allowed, it just shouldn't be a surprise.
+   */
+  get newFileWarning(): string | null {
+    const folder = this.newFileFolder;
+    if (!folder || this.newFileError) return null;
+    const name = normalizeCueFileName(this.newFileName);
+    if (this.docs.some((d) => d.folder === folder && d.saveName === name)) {
+      return `“${name}” is already open in another tab. Saving both will overwrite one with the other.`;
+    }
+    if (folder.cueFiles.includes(name)) {
+      return `“${name}” already exists in this folder. Saving will overwrite it.`;
+    }
+    return null;
+  }
+
+  /** Create the document the dialog describes. No-op if the name is invalid. */
+  createCueFile(): void {
+    const folder = this.newFileFolder;
+    if (!folder || this.newFileError) return;
+    const doc = new Doc(folder, defaultProject(), normalizeCueFileName(this.newFileName), this);
+    doc.dirty = true; // nothing on disk yet — Save is the thing that creates it
+    this.addDoc(doc);
+    this.newFileFolder = null;
+    this.chooserFolder = null;
+    this.status = 'ready';
+  }
+
+  cancelNewCueFile(): void {
+    this.newFileFolder = null;
+    // Opening a folder with no cue files goes straight to this dialog, so
+    // backing out of it with nothing open means there's nothing to show.
+    if (this.docs.length === 0) this.status = 'empty';
+    else if (this.status !== 'choosing') this.status = 'ready';
+  }
+
+  /** Re-open the cue-file chooser for the active document's folder. It doubles
+   *  as the "create one instead" entry point, so an empty folder still opens it. */
+  showChooser(): void {
+    const folder = this.activeDoc?.folder;
+    if (folder) {
+      this.chooserFolder = folder;
+      this.status = 'choosing';
+    }
+  }
+
+  /** Dismiss the chooser without opening anything (only if something's open). */
+  cancelChooser(): void {
+    if (this.docs.length === 0) return;
+    this.chooserFolder = null;
+    this.status = 'ready';
+  }
+
+  private addDoc(doc: Doc): void {
+    this.docs.push(doc);
+    this.activeDocId = doc.id;
+    this.propertiesCueId = null;
+  }
+
+  private uniqueName(folder: Folder, name: string): string {
+    const taken = folder.cueFiles;
+    if (!taken.includes(name)) return name;
+    const dot = name.lastIndexOf('.');
+    const stem = dot >= 0 ? name.slice(0, dot) : name;
+    const ext = dot >= 0 ? name.slice(dot) : '';
+    let i = 2;
+    while (taken.includes(`${stem}-${i}${ext}`)) i++;
+    return `${stem}-${i}${ext}`;
   }
 
   // ---- Properties modal & context menu -----------------------------------
+
+  get propertiesCue(): Cue | null {
+    if (this.propertiesCueId == null) return null;
+    return this.activeDoc?.findCue(this.propertiesCueId) ?? null;
+  }
 
   openProperties(id: string): void {
     this.propertiesCueId = id;
@@ -145,324 +321,131 @@ export class AppState {
     this.contextMenu = null;
   }
 
-  // ---- Loading / saving --------------------------------------------------
+  // ---- Active-document forwarding ----------------------------------------
 
-  /** Pick a folder and open its cue file, or show a chooser if there are several. */
-  async openFolder(): Promise<void> {
-    try {
-      this.status = 'loading';
-      this.errorMessage = '';
-      const opened = await pickProjectFolder();
-      this.dir = opened.dir;
-      this.cueFiles = opened.cueFiles;
-      this.audioFiles = opened.audioFiles;
-      if (opened.cueFiles.length === 0) {
-        this.loadProjectData(defaultProject(), DEFAULT_CUE_FILE);
-        this.status = 'ready';
-      } else if (opened.cueFiles.length === 1) {
-        await this.openCueFile(opened.cueFiles[0]);
-      } else {
-        this.status = 'choosing';
-      }
-    } catch (err) {
-      this.status = this.project ? 'ready' : 'error';
-      this.errorMessage = err instanceof Error ? err.message : String(err);
-    }
+  get project() {
+    return this.activeDoc?.project ?? null;
   }
-
-  /** Load one of the folder's cue files (used from the chooser). */
-  async openCueFile(name: string): Promise<void> {
-    if (!this.dir) return;
-    try {
-      this.status = 'loading';
-      this.errorMessage = '';
-      const { project, saveName } = await readCueFile(this.dir, name);
-      this.loadProjectData(project, saveName, name);
-      await this.decodeAll();
-      this.status = 'ready';
-    } catch (err) {
-      this.status = 'error';
-      this.errorMessage = err instanceof Error ? err.message : String(err);
-    }
+  get activeTab(): Tab | null {
+    return this.activeDoc?.activeTab ?? null;
   }
-
-  /** Start a fresh, empty cue file in the current folder. */
-  newCueFile(): void {
-    this.loadProjectData(defaultProject(), this.uniqueName(DEFAULT_CUE_FILE));
-    this.dirty = true;
-    this.status = 'ready';
+  get activeTabId(): string {
+    return this.activeDoc?.activeTabId ?? '';
   }
-
-  /** Re-open the cue-file chooser for the current folder. */
-  showChooser(): void {
-    if (this.cueFiles.length > 0) this.status = 'choosing';
+  set activeTabId(id: string) {
+    if (this.activeDoc) this.activeDoc.activeTabId = id;
   }
-
-  private loadProjectData(project: Project, saveName: string, sourceName: string | null = null): void {
-    this.engine.clear();
-    this.project = project;
-    this.saveName = saveName;
-    this.currentFileName = sourceName;
-    this.activeTabId = project.tabs[0]?.id ?? '';
-    this.propertiesCueId = null;
-    this.contextMenu = null;
-    this.dirty = false;
-    this.playStates = {};
-    this.engine.setMasterVolume(project.masterVolume);
+  get dirty(): boolean {
+    return this.activeDoc?.dirty ?? false;
   }
-
-  /** Best-effort resolve a cue's file to an existing path (exact, else basename). */
-  private resolveAudioPath(file: string): string | null {
-    if (!file) return null;
-    if (this.audioFiles.includes(file)) return file;
-    const base = file.split('/').pop();
-    return this.audioFiles.find((f) => f.split('/').pop() === base) ?? null;
+  /** Whether any open document has unsaved changes (for the unload warning). */
+  get anyDirty(): boolean {
+    return this.docs.some((d) => d.dirty);
   }
-
-  private async decodeAll(): Promise<void> {
-    if (!this.project || !this.dir) return;
-    const audioCues: AudioCue[] = [];
-    for (const tab of this.project.tabs) {
-      for (const cue of tab.cues) {
-        if (cue.type === 'audio' && cue.file) audioCues.push(cue);
-      }
-    }
-    this.loadProgress = { done: 0, total: audioCues.length };
-    for (const cue of audioCues) {
-      const resolved = this.resolveAudioPath(cue.file);
-      if (resolved) {
-        // Point the cue at the actual file found in the folder tree.
-        if (resolved !== cue.file) cue.file = resolved;
-        try {
-          await this.engine.decode(cue.id, resolved, await loadAudioBytes(this.dir, resolved));
-        } catch (err) {
-          console.warn(`Failed to load "${resolved}":`, err);
-        }
-      }
-      this.loadProgress = { done: this.loadProgress.done + 1, total: audioCues.length };
-    }
+  get saveName(): string {
+    return this.activeDoc?.saveName ?? '';
   }
-
-  /** Decode a single cue's file (after adding/changing it). The engine measures
-   * the file's loudness-normalization gain the first time it sees the path. */
-  async reloadCueAudio(cue: AudioCue): Promise<void> {
-    if (!this.dir || !cue.file) return;
-    const resolved = this.resolveAudioPath(cue.file) ?? cue.file;
-    // Point the cue at the real path so its gain key matches the decoded file.
-    if (resolved !== cue.file) cue.file = resolved;
-    try {
-      await this.engine.decode(cue.id, resolved, await loadAudioBytes(this.dir, resolved));
-    } catch (err) {
-      console.warn(`Failed to load "${resolved}":`, err);
-    }
+  get cueFiles(): string[] {
+    return this.chooserFolder?.cueFiles ?? this.activeDoc?.folder.cueFiles ?? [];
   }
-
-  async refreshAudioFiles(): Promise<void> {
-    if (!this.dir) return;
-    this.audioFiles = await listAudioFiles(this.dir);
+  get audioFiles(): string[] {
+    return this.activeDoc?.folder.audioFiles ?? [];
   }
-
-  private uniqueName(name: string): string {
-    if (!this.cueFiles.includes(name)) return name;
-    const dot = name.lastIndexOf('.');
-    const stem = dot >= 0 ? name.slice(0, dot) : name;
-    const ext = dot >= 0 ? name.slice(dot) : '';
-    let i = 2;
-    while (this.cueFiles.includes(`${stem}-${i}${ext}`)) i++;
-    return `${stem}-${i}${ext}`;
-  }
-
-  async save(): Promise<void> {
-    if (!this.dir || !this.project) return;
-    try {
-      await writeCueFile(this.dir, this.saveName, this.project);
-      this.currentFileName = this.saveName;
-      if (!this.cueFiles.includes(this.saveName)) {
-        this.cueFiles = await listCueFiles(this.dir);
-      }
-      this.dirty = false;
-    } catch (err) {
-      this.errorMessage = err instanceof Error ? err.message : String(err);
-    }
+  /** Decode progress of the active document, falling back to the folder-level one. */
+  get progressView(): { done: number; total: number } {
+    const doc = this.activeDoc;
+    return doc && doc.loading ? doc.loadProgress : this.loadProgress;
   }
 
   markDirty(): void {
-    this.dirty = true;
+    this.activeDoc?.markDirty();
   }
-
-  hasBuffer(id: string): boolean {
-    return this.engine.hasBuffer(id);
+  save(): Promise<void> {
+    return this.activeDoc?.save() ?? Promise.resolve();
   }
-
-  // ---- Cue resolution ----------------------------------------------------
-
-  resolveRef(ref: CueRef): Cue | null {
-    return this.findCue(ref.cueId);
+  cueAt(tab: Tab, row: number, col: number) {
+    return this.activeDoc?.cueAt(tab, row, col);
   }
-
-  /** Which tab currently holds this cue. */
-  tabOf(cue: Cue): Tab | null {
-    if (!this.project) return null;
-    return this.project.tabs.find((t) => t.cues.some((c) => c.id === cue.id)) ?? null;
+  display(cue: Cue): CueDisplay {
+    return (
+      this.activeDoc?.display(cue) ??
+      { name: '', color: '#555', state: 'idle', missing: true, pending: false }
+    );
   }
-
-  /** Follow a proxy to the cue that actually holds the media. */
-  resolveProxy(cue: Cue, seen = new Set<string>()): Cue | null {
-    if (cue.type !== 'proxy') return cue;
-    if (seen.has(cue.id)) return null; // cycle
-    seen.add(cue.id);
-    const src = this.resolveRef(cue.source);
-    if (!src) return null;
-    return this.resolveProxy(src, seen);
-  }
-
-  /** What a tile should display (proxies mirror their source). */
-  display(cue: Cue): { name: string; color: string; state: PlaybackState; missing: boolean } {
-    if (cue.type === 'proxy') {
-      const src = this.resolveProxy(cue);
-      if (!src || src.type === 'proxy') {
-        return { name: 'proxy?', color: '#555', state: 'idle', missing: true };
-      }
-      const inner = this.display(src);
-      return { ...inner, missing: false };
-    }
-    if (cue.type === 'http' || cue.type === 'timer') {
-      return { name: cue.name, color: cue.color, state: 'idle', missing: false };
-    }
-    return {
-      name: cue.name,
-      color: cue.color,
-      state: this.playStates[cue.id] ?? 'idle',
-      missing: !this.engine.hasBuffer(cue.id),
-    };
-  }
-
-  // ---- Playback / dispatch ----------------------------------------------
-
-  /** User clicked a tile (or a trigger fired a "click"). */
   activate(cue: Cue): void {
-    this.propagate(() => this.performAction(cue, 'click'));
+    this.activeDoc?.activate(cue);
   }
-
-  private performAction(cue: Cue, action: TriggerAction, fade?: boolean): void {
-    const target = this.resolveProxy(cue);
-    if (!target) return;
-    this.firing.add(target.id);
-
-    if (target.type === 'audio') {
-      const f = fade ?? false;
-      switch (action) {
-        case 'click':
-          this.engine.toggle(target);
-          break;
-        case 'start':
-          this.engine.start(target, f, true);
-          break;
-        case 'pause':
-          this.engine.pause(target, f);
-          break;
-        case 'resume':
-          this.engine.resume(target, f);
-          break;
-        case 'stop':
-          this.engine.stop(target, f, 'stop');
-          break;
-      }
-    } else if (target.type === 'http') {
-      this.fireHttp(target);
-    } else if (target.type === 'timer') {
-      if (action === 'click') {
-        this.runTimerCue(target);
-      } else if (action === 'set' || action === 'pause' || action === 'resume' || action === 'clear') {
-        this.applyTimerAction(target, action);
-        this.fireTriggers(target.id, 'onStart');
-      }
-    }
+  progress(cue: Parameters<Doc['progress']>[0]): number {
+    return this.activeDoc?.progress(cue) ?? 0;
   }
-
-  private applyTimerAction(cue: TimerCue, action: TimerAction): void {
-    switch (action) {
-      case 'set':
-        this.timerCueId = cue.id;
-        this.setTimer(cue.duration);
-        break;
-      case 'pause':
-        this.pauseTimer();
-        break;
-      case 'resume':
-        this.resumeTimer();
-        break;
-      case 'clear':
-        this.clearTimer();
-        break;
-    }
+  level(cue: Parameters<Doc['level']>[0]): number {
+    return this.activeDoc?.level(cue) ?? 0;
   }
-
-  private runTimerCue(cue: TimerCue): void {
-    this.applyTimerAction(cue, cue.action);
-    // Timer cues can also chain onStart triggers.
-    this.fireTriggers(cue.id, 'onStart');
+  fadeProgress(cue: Parameters<Doc['fadeProgress']>[0]): number {
+    return this.activeDoc?.fadeProgress(cue) ?? 1;
   }
-
-  private fireTriggers(cueId: string, event: Trigger['event']): void {
-    const cue = this.findCue(cueId);
-    if (!cue) return;
-    for (const trig of cue.triggers) {
-      if (trig.event !== event) continue;
-      const target = this.resolveRef(trig.target);
-      if (!target) continue;
-      const effective = this.resolveProxy(target);
-      if (!effective || this.firing.has(effective.id)) continue;
-      this.performAction(effective, trig.action, trig.fade);
-    }
+  resolveRef(ref: Parameters<Doc['resolveRef']>[0]) {
+    return this.activeDoc?.resolveRef(ref) ?? null;
   }
-
-  private propagate(fn: () => void): void {
-    this.propagating += 1;
-    try {
-      fn();
-    } finally {
-      this.propagating -= 1;
-      if (this.propagating === 0) this.firing.clear();
-    }
+  resolveProxy(cue: Cue) {
+    return this.activeDoc?.resolveProxy(cue) ?? null;
   }
-
-  private findCue(id: string): Cue | null {
-    if (!this.project) return null;
-    for (const tab of this.project.tabs) {
-      const found = tab.cues.find((c) => c.id === id);
-      if (found) return found;
-    }
-    return null;
+  tabOf(cue: Cue) {
+    return this.activeDoc?.tabOf(cue) ?? null;
   }
-
-  private async fireHttp(cue: Cue): Promise<void> {
-    if (cue.type !== 'http') return;
-    this.httpFlashes[cue.id] = { state: 'firing', at: Date.now() };
-    // HTTP cues can also chain onStart triggers.
-    this.fireTriggers(cue.id, 'onStart');
-    try {
-      const init: RequestInit = {
-        method: cue.method,
-        headers: cue.headers,
-        mode: 'cors',
-      };
-      if (cue.method !== 'GET' && cue.body) init.body = cue.body;
-      const res = await fetch(cue.url, init);
-      this.httpFlashes[cue.id] = { state: res.ok ? 'ok' : 'error', at: Date.now() };
-    } catch {
-      this.httpFlashes[cue.id] = { state: 'error', at: Date.now() };
-    }
+  hasBuffer(id: string): boolean {
+    return this.activeDoc?.hasBuffer(id) ?? false;
   }
-
+  async reloadCueAudio(cue: Parameters<Doc['reloadCueAudio']>[0]): Promise<void> {
+    await this.activeDoc?.reloadCueAudio(cue);
+    this.memoryVersion++;
+  }
+  setGrid(rows: number, cols: number): void {
+    this.activeDoc?.setGrid(rows, cols);
+  }
   setMasterVolume(v: number): void {
-    if (!this.project) return;
-    this.project.masterVolume = v;
-    this.engine.setMasterVolume(v);
-    this.markDirty();
+    this.activeDoc?.setMasterVolume(v);
+  }
+  get httpFlashes() {
+    return this.activeDoc?.httpFlashes ?? {};
+  }
+
+  /** Create a cue and open its properties. */
+  addNewCue(type: Parameters<Doc['addNewCue']>[0], row: number, col: number): void {
+    const id = this.activeDoc?.addNewCue(type, row, col);
+    if (id) this.openProperties(id);
+  }
+  removeCue(id: string): void {
+    this.activeDoc?.removeCue(id);
+    if (this.propertiesCueId === id) this.propertiesCueId = null;
+    this.memoryVersion++;
+  }
+  moveCue(id: string, row: number, col: number): void {
+    this.activeDoc?.moveCue(id, row, col);
+  }
+  copyCue(id: string, row: number, col: number): void {
+    this.activeDoc?.copyCue(id, row, col);
+  }
+  async importAudioFiles(files: File[], row: number, col: number): Promise<void> {
+    await this.activeDoc?.importAudioFiles(files, row, col);
+    this.memoryVersion++;
+  }
+  addTab(): void {
+    this.activeDoc?.addTab();
+  }
+  removeTab(id: string): void {
+    this.activeDoc?.removeTab(id);
+    this.memoryVersion++;
+  }
+  renameTab(id: string, name: string): void {
+    this.activeDoc?.renameTab(id, name);
   }
 
   // ---- Global timer ------------------------------------------------------
+
+  claimTimer(onFinished: () => void): void {
+    this.onTimerFinished = onFinished;
+  }
 
   setTimer(seconds: number): void {
     const dur = Math.max(0, seconds);
@@ -504,7 +487,7 @@ export class AppState {
     this.timer.running = false;
     this.timer.finished = false;
     this.timer.endsAt = null;
-    this.timerCueId = null;
+    this.onTimerFinished = null;
     this.stopTimerInterval();
     this.renderTimer();
   }
@@ -525,9 +508,9 @@ export class AppState {
       this.timer.finished = true;
       this.timer.endsAt = null;
       this.stopTimerInterval();
-      const cueId = this.timerCueId;
-      this.timerCueId = null;
-      if (cueId) this.propagate(() => this.fireTriggers(cueId, 'onStop'));
+      const finished = this.onTimerFinished;
+      this.onTimerFinished = null;
+      finished?.();
     }
     this.renderTimer();
   }
@@ -546,171 +529,6 @@ export class AppState {
 
   private renderTimer(): void {
     this.timerWindow.render($state.snapshot(this.timer));
-  }
-
-  // ---- Progress readouts (reactive via `tick`) ---------------------------
-
-  progress(cue: AudioCue): number {
-    void this.tick; // reactive dependency
-    const dur = this.engine.getDuration(cue);
-    if (dur <= 0) return 0;
-    return Math.min(1, (this.engine.getPosition(cue) - cue.startTime) / dur);
-  }
-
-  /** Live loudness of a playing audio cue (0..1), for reactive glow. */
-  level(cue: AudioCue): number {
-    void this.tick; // reactive dependency
-    // Perceptual-ish boost so typical music produces a lively glow.
-    return Math.min(1, this.engine.getLevel(cue.id) * 2.8);
-  }
-
-  private ensureRaf(): void {
-    if (this.rafId) return;
-    const loop = () => {
-      this.tick += 1;
-      this.rafId = this.engine.activeCount() > 0 ? requestAnimationFrame(loop) : 0;
-    };
-    this.rafId = requestAnimationFrame(loop);
-  }
-
-  // ---- Grid editing ------------------------------------------------------
-
-  /** Create a cue of the given type at a cell and open its properties. */
-  addNewCue(type: CueType, row: number, col: number): void {
-    const tab = this.activeTab;
-    if (!tab || this.cueAt(tab, row, col)) return;
-    const cue: Cue =
-      type === 'audio'
-        ? defaultAudioCue(row, col)
-        : type === 'proxy'
-          ? defaultProxyCue(row, col)
-          : type === 'timer'
-            ? defaultTimerCue(row, col)
-            : defaultHttpCue(row, col);
-    tab.cues.push(cue);
-    this.markDirty();
-    this.openProperties(cue.id);
-  }
-
-  /**
-   * Import dropped OS audio files: copy each into the folder and add an audio
-   * cue, starting at (row, col) and filling empty cells from there.
-   */
-  async importAudioFiles(files: File[], row: number, col: number): Promise<void> {
-    const tab = this.activeTab;
-    if (!this.dir || !this.project || !tab || files.length === 0) return;
-    const cells = this.emptyCellsFrom(tab, row, col, files.length);
-    const taken = new Set(
-      this.audioFiles.filter((f) => !f.includes('/')).map((f) => f.toLowerCase()),
-    );
-    try {
-      for (let i = 0; i < files.length && i < cells.length; i++) {
-        const name = await writeMediaFile(this.dir, files[i], taken);
-        const cue = defaultAudioCue(cells[i].row, cells[i].col);
-        cue.file = name;
-        cue.name = name.replace(/\.[^.]+$/, '');
-        tab.cues.push(cue);
-        await this.reloadCueAudio(cue);
-      }
-      await this.refreshAudioFiles();
-      this.markDirty();
-    } catch (err) {
-      this.errorMessage = err instanceof Error ? err.message : String(err);
-    }
-  }
-
-  /** Empty grid cells starting at (row, col), wrapping through the grid. */
-  private emptyCellsFrom(tab: Tab, row: number, col: number, count: number): { row: number; col: number }[] {
-    const { rows, cols } = this.project!.grid;
-    const total = rows * cols;
-    const start = row * cols + col;
-    const out: { row: number; col: number }[] = [];
-    for (let k = 0; k < total && out.length < count; k++) {
-      const i = (start + k) % total;
-      const r = Math.floor(i / cols);
-      const c = i % cols;
-      if (!this.cueAt(tab, r, c)) out.push({ row: r, col: c });
-    }
-    return out;
-  }
-
-  removeCue(id: string): void {
-    for (const tab of this.project?.tabs ?? []) {
-      const idx = tab.cues.findIndex((c) => c.id === id);
-      if (idx >= 0) {
-        tab.cues.splice(idx, 1);
-        break;
-      }
-    }
-    if (this.propertiesCueId === id) this.propertiesCueId = null;
-    this.markDirty();
-  }
-
-  /** Move a cue to a cell in the same tab; swap if the target is occupied. */
-  moveCue(id: string, row: number, col: number): void {
-    const tab = this.activeTab;
-    if (!tab) return;
-    const cue = tab.cues.find((c) => c.id === id);
-    if (!cue) return;
-    const occupant = tab.cues.find((c) => c.row === row && c.col === col && c.id !== id);
-    if (occupant) {
-      occupant.row = cue.row;
-      occupant.col = cue.col;
-    }
-    cue.row = row;
-    cue.col = col;
-    this.markDirty();
-  }
-
-  /** Copy a cue into an empty cell in the same tab. */
-  copyCue(id: string, row: number, col: number): void {
-    const tab = this.activeTab;
-    if (!tab) return;
-    if (this.cueAt(tab, row, col)) return; // don't overwrite
-    const src = tab.cues.find((c) => c.id === id);
-    if (!src) return;
-    const clone: Cue = { ...structuredClone($state.snapshot(src)), id: makeId('cue'), row, col };
-    tab.cues.push(clone);
-    if (clone.type === 'audio') void this.reloadCueAudio(clone);
-    this.markDirty();
-  }
-
-  setGrid(rows: number, cols: number): void {
-    if (!this.project) return;
-    this.project.grid = {
-      rows: Math.max(1, Math.floor(rows)),
-      cols: Math.max(1, Math.floor(cols)),
-    };
-    this.markDirty();
-  }
-
-  // ---- Tabs --------------------------------------------------------------
-
-  addTab(): void {
-    if (!this.project) return;
-    const tab: Tab = { id: makeId('tab'), name: `Tab ${this.project.tabs.length + 1}`, cues: [] };
-    this.project.tabs.push(tab);
-    this.activeTabId = tab.id;
-    this.markDirty();
-  }
-
-  removeTab(id: string): void {
-    if (!this.project || this.project.tabs.length <= 1) return;
-    const idx = this.project.tabs.findIndex((t) => t.id === id);
-    if (idx < 0) return;
-    this.project.tabs.splice(idx, 1);
-    if (this.activeTabId === id) {
-      this.activeTabId = this.project.tabs[Math.max(0, idx - 1)].id;
-    }
-    this.markDirty();
-  }
-
-  renameTab(id: string, name: string): void {
-    const tab = this.project?.tabs.find((t) => t.id === id);
-    if (tab) {
-      tab.name = name;
-      this.markDirty();
-    }
   }
 }
 

@@ -1,8 +1,14 @@
-// Web Audio engine: decodes audio into AudioBuffers up front and plays each hit
-// through a fresh AudioBufferSourceNode -> per-cue GainNode -> masterGain, with
-// sample-accurate fades. This keeps click-to-sound latency near zero.
+// Web Audio engine: holds decoded AudioBuffers up front and plays each hit
+// through a fresh AudioBufferSourceNode -> per-cue GainNode -> the document's
+// masterGain, with sample-accurate fades. This keeps click-to-sound latency near
+// zero.
+//
+// One engine per open document. The AudioContext and the decoded buffers
+// themselves are shared process-wide (see sharedAudio.ts); this class owns only
+// the document's master gain node and its cue -> file bindings.
 
 import type { AudioCue, PlaybackState, TriggerEvent } from '../types';
+import { audioCache, cacheKey, getAudioContext, resumeAudioContext } from './sharedAudio';
 
 type CueEvent = TriggerEvent;
 
@@ -21,9 +27,17 @@ interface Playback {
   startedAt: number;
   /** Offset into the buffer (seconds) where playback started. */
   offset: number;
+  /** ctx.currentTime at which this playback reaches its out point (0 = loops). */
+  endsAt: number;
+  /** Window of the fade currently in progress, for the readout. Equal when
+   *  nothing is fading. */
+  fadeFrom: number;
+  fadeUntil: number;
   state: PlaybackState;
   /** Timer that flips fadingIn -> playing. */
   fadeInTimer: number | null;
+  /** Timer that flips playing -> fadingOut for a scheduled end-of-clip fade. */
+  endFadeTimer: number | null;
   /** Timer that finalizes after a fade-out. */
   stopTimer: number | null;
   /** A deliberate stop/pause was requested (vs. a natural end). */
@@ -35,156 +49,11 @@ interface Playback {
 
 const MIN_GAIN = 0.0001;
 
-// Loudness normalization, ITU-R BS.1770 / EBU R128 style — the same approach
-// streaming platforms use. We measure a track's INTEGRATED loudness (LUFS) once
-// and apply a single static gain to reach a reference level, which preserves the
-// track's own dynamics (unlike compression, we never ride the gain within a
-// song). Two refinements over plain RMS matter for music:
-//   * K-weighting: a perceptual frequency filter, so a bass-heavy track and a
-//     bright one that measure equal actually sound equally loud.
-//   * Gating: loudness is measured in 400 ms blocks and near-silent blocks are
-//     dropped, so a quiet intro/breakdown doesn't drag the average down.
-// A sample-peak guard then caps the gain so playback can't clip at volume = 1.
-const TARGET_LUFS = -14; // reference integrated loudness (Spotify/YouTube-ish)
-const ABS_GATE_LUFS = -70; // BS.1770 absolute gate
-const REL_GATE_LU = -10; // relative gate, in LU below the ungated mean
-const BLOCK_SEC = 0.4; // gating block length
-const HOP_SEC = 0.1; // 75% overlap between blocks
-const PEAK_CEIL = 0.99; // leave a sliver of headroom below full scale
-const MIN_NORM_GAIN = 0.1;
-const MAX_NORM_GAIN = 16;
-
-interface Biquad {
-  b0: number;
-  b1: number;
-  b2: number;
-  a1: number;
-  a2: number;
-}
-
-/** The two BS.1770 K-weighting stages, redesigned for the given sample rate. */
-function kWeighting(fs: number): [Biquad, Biquad] {
-  // Stage 1: high shelf (~ +4 dB above ~1.5 kHz).
-  const K1 = Math.tan((Math.PI * 1681.9744509555319) / fs);
-  const Q1 = 0.7071752369554193;
-  const Vh = Math.pow(10, 3.99984385397 / 20);
-  const Vb = Math.pow(Vh, 0.4996667741545416);
-  const a0 = 1 + K1 / Q1 + K1 * K1;
-  const shelf: Biquad = {
-    b0: (Vh + (Vb * K1) / Q1 + K1 * K1) / a0,
-    b1: (2 * (K1 * K1 - Vh)) / a0,
-    b2: (Vh - (Vb * K1) / Q1 + K1 * K1) / a0,
-    a1: (2 * (K1 * K1 - 1)) / a0,
-    a2: (1 - K1 / Q1 + K1 * K1) / a0,
-  };
-  // Stage 2: RLB high-pass (~38 Hz).
-  const K2 = Math.tan((Math.PI * 38.13547087602444) / fs);
-  const Q2 = 0.5003270373238773;
-  const d = 1 + K2 / Q2 + K2 * K2;
-  const hp: Biquad = {
-    b0: 1,
-    b1: -2,
-    b2: 1,
-    a1: (2 * (K2 * K2 - 1)) / d,
-    a2: (1 - K2 / Q2 + K2 * K2) / d,
-  };
-  return [shelf, hp];
-}
-
-/** Apply a biquad to a channel in place (direct form I). */
-function filterInPlace(x: Float32Array, f: Biquad): void {
-  let x1 = 0,
-    x2 = 0,
-    y1 = 0,
-    y2 = 0;
-  for (let i = 0; i < x.length; i++) {
-    const x0 = x[i];
-    const y0 = f.b0 * x0 + f.b1 * x1 + f.b2 * x2 - f.a1 * y1 - f.a2 * y2;
-    x2 = x1;
-    x1 = x0;
-    y2 = y1;
-    y1 = y0;
-    x[i] = y0;
-  }
-}
-
-/** Integrated loudness in LUFS (BS.1770 gated), or -Infinity if immeasurable. */
-function integratedLufs(buffer: AudioBuffer): number {
-  const fs = buffer.sampleRate;
-  const len = buffer.length;
-  const block = Math.round(BLOCK_SEC * fs);
-  if (len < block) return -Infinity; // too short to gate meaningfully
-  const [shelf, hp] = kWeighting(fs);
-
-  // K-weight a copy of each channel (all channels weighted 1.0 — fine for
-  // mono/stereo music).
-  const chans: Float32Array[] = [];
-  for (let c = 0; c < buffer.numberOfChannels; c++) {
-    const y = new Float32Array(buffer.getChannelData(c));
-    filterInPlace(y, shelf);
-    filterInPlace(y, hp);
-    chans.push(y);
-  }
-
-  // Mean square per 400 ms block, summed across channels.
-  const hop = Math.round(HOP_SEC * fs);
-  const z: number[] = [];
-  for (let start = 0; start + block <= len; start += hop) {
-    let sum = 0;
-    for (const d of chans) {
-      let s = 0;
-      for (let i = start; i < start + block; i++) s += d[i] * d[i];
-      sum += s / block;
-    }
-    z.push(sum);
-  }
-
-  const loud = (ms: number) => -0.691 + 10 * Math.log10(ms);
-  // Absolute gate, then relative gate at -10 LU below the abs-gated mean.
-  let sum = 0,
-    n = 0;
-  for (const ms of z) if (ms > 0 && loud(ms) >= ABS_GATE_LUFS) (sum += ms), n++;
-  if (n === 0) return -Infinity;
-  const relThresh = loud(sum / n) + REL_GATE_LU;
-  sum = 0;
-  n = 0;
-  for (const ms of z) {
-    if (ms > 0 && loud(ms) >= ABS_GATE_LUFS && loud(ms) >= relThresh) (sum += ms), n++;
-  }
-  if (n === 0) return -Infinity;
-  return loud(sum / n);
-}
-
-/**
- * Measure a decoded buffer and return the gain that brings it to the reference
- * loudness (bounded, and peak-limited so it can't clip at volume 1).
- */
-function measureNormalizeGain(buffer: AudioBuffer): number {
-  const lufs = integratedLufs(buffer);
-  if (!isFinite(lufs)) return 1; // too short / silent — leave it alone
-
-  let peak = 0;
-  for (let c = 0; c < buffer.numberOfChannels; c++) {
-    const d = buffer.getChannelData(c);
-    for (let i = 0; i < d.length; i++) {
-      const a = d[i] < 0 ? -d[i] : d[i];
-      if (a > peak) peak = a;
-    }
-  }
-
-  const loudGain = Math.pow(10, (TARGET_LUFS - lufs) / 20);
-  const peakGain = peak > MIN_GAIN ? PEAK_CEIL / peak : MAX_NORM_GAIN;
-  const gain = Math.min(loudGain, peakGain);
-  return Math.min(MAX_NORM_GAIN, Math.max(MIN_NORM_GAIN, gain));
-}
-
 export class AudioEngine {
   private ctx: AudioContext;
   private masterGain: GainNode;
-  private buffers = new Map<string, AudioBuffer>();
-  /** Loudness-normalization gain per file path, measured once and shared by
-   *  every cue pointing at that file. Rebuilt on open; not persisted. */
-  private fileGains = new Map<string, number>();
+  /** Cue id -> shared-cache key, i.e. which file each cue is bound to. */
+  private bindings = new Map<string, string>();
   private active = new Map<string, Playback>();
   /** Saved resume position for cues whose onStopBehavior is "pause". */
   private paused = new Map<string, number>();
@@ -195,17 +64,14 @@ export class AudioEngine {
   onCueEvent: ((id: string, event: CueEvent) => void) | null = null;
 
   constructor() {
-    // A hint of latency headroom; 'interactive' minimises output latency.
-    this.ctx = new AudioContext({ latencyHint: 'interactive' });
+    this.ctx = getAudioContext();
     this.masterGain = this.ctx.createGain();
     this.masterGain.gain.value = 1;
     this.masterGain.connect(this.ctx.destination);
   }
 
-  /** Must be called from a user gesture; browsers start the context suspended. */
   resumeContext(): Promise<void> {
-    if (this.ctx.state === 'suspended') return this.ctx.resume();
-    return Promise.resolve();
+    return resumeAudioContext();
   }
 
   setMasterVolume(v: number): void {
@@ -213,26 +79,56 @@ export class AudioEngine {
   }
 
   /**
-   * Decode `bytes` for a cue, keyed by cue id. `file` is the source path: the
-   * first time a given file is seen we measure its loudness-normalization gain
-   * and cache it by path, so every cue (and copy) using that file matches.
+   * Bind a cue to a file in the shared cache, decoding it if no other cue (in
+   * any document) already holds it. `folderId` scopes the path so two folders
+   * with a same-named file don't collide.
    */
-  async decode(id: string, file: string, bytes: ArrayBuffer): Promise<void> {
-    const buffer = await this.ctx.decodeAudioData(bytes);
-    this.buffers.set(id, buffer);
-    if (file && !this.fileGains.has(file)) {
-      this.fileGains.set(file, measureNormalizeGain(buffer));
+  async load(id: string, folderId: string, path: string, load: () => Promise<ArrayBuffer>): Promise<void> {
+    const key = cacheKey(folderId, path);
+    const previous = this.bindings.get(id);
+    if (previous === key) return; // already bound to this exact file
+    this.bindings.set(id, key);
+    try {
+      await audioCache.acquire(key, load);
+      // A later load() (or unload) may have re-pointed this cue while we waited.
+      if (this.bindings.get(id) !== key) {
+        audioCache.release(key);
+        return;
+      }
+      if (previous) audioCache.release(previous);
+    } catch (err) {
+      if (this.bindings.get(id) === key) this.bindings.delete(id);
+      if (previous) audioCache.release(previous);
+      throw err;
     }
   }
 
-  hasBuffer(id: string): boolean {
-    return this.buffers.has(id);
+  /** Drop a cue's claim on its file (when the cue is deleted). */
+  unload(id: string): void {
+    const key = this.bindings.get(id);
+    if (!key) return;
+    this.bindings.delete(id);
+    audioCache.release(key);
   }
+
+  private cached(id: string) {
+    const key = this.bindings.get(id);
+    return key ? audioCache.get(key) : null;
+  }
+
+  private bufferFor(id: string): AudioBuffer | null {
+    return this.cached(id)?.buffer ?? null;
+  }
+
+  // NOTE: whether a cue's media is loaded is deliberately not exposed here.
+  // Buffers live in a plain Map in the shared cache, so any answer this could
+  // give would be unobservable to the UI; Doc.audioStatus tracks readiness in
+  // reactive state instead, and is what tiles and the inspector read.
 
   /** Effective linear gain for a cue: user trim scaled by its file's
    *  loudness-normalization gain (1 if the file hasn't been measured). */
   private effectiveGain(cue: AudioCue): number {
-    return Math.max(0, cue.volume * (this.fileGains.get(cue.file) ?? 1));
+    return Math.max(0, cue.volume * (this.cached(cue.id)?.gain ?? 1));
   }
 
   getState(id: string): PlaybackState {
@@ -245,7 +141,7 @@ export class AudioEngine {
 
   /** Effective clip length in seconds (respects start/end trim). */
   getDuration(cue: AudioCue): number {
-    const buffer = this.buffers.get(cue.id);
+    const buffer = this.bufferFor(cue.id);
     if (!buffer) return 0;
     const end = cue.endTime ?? buffer.duration;
     return Math.max(0, end - cue.startTime);
@@ -254,7 +150,7 @@ export class AudioEngine {
   /** Current playback position within the file (seconds). */
   getPosition(cue: AudioCue): number {
     const pb = this.active.get(cue.id);
-    const buffer = this.buffers.get(cue.id);
+    const buffer = this.bufferFor(cue.id);
     if (!buffer) return cue.startTime;
     const end = cue.endTime ?? buffer.duration;
     if (!pb) return this.paused.get(cue.id) ?? cue.startTime;
@@ -264,6 +160,18 @@ export class AudioEngine {
       if (span > 0) pos = cue.startTime + ((pos - cue.startTime) % span);
     }
     return Math.min(pos, end);
+  }
+
+  /**
+   * How far through the fade currently in progress, 0..1 — 1 when the cue
+   * isn't fading. Read off the audio clock, so it matches what's audible
+   * rather than counting frames.
+   */
+  getFadeProgress(id: string): number {
+    const pb = this.active.get(id);
+    if (!pb || pb.fadeUntil <= pb.fadeFrom) return 1;
+    const span = pb.fadeUntil - pb.fadeFrom;
+    return Math.min(1, Math.max(0, (this.ctx.currentTime - pb.fadeFrom) / span));
   }
 
   /** Live output loudness of a playing cue (RMS, 0..1). 0 if not playing. */
@@ -289,7 +197,7 @@ export class AudioEngine {
    *  (used by the explicit "Start" trigger action; click/toggle and resume() keep
    *  `fresh = false`, i.e. auto-resume if there's a saved position). */
   start(cue: AudioCue, fade = true, fresh = false): void {
-    const buffer = this.buffers.get(cue.id);
+    const buffer = this.bufferFor(cue.id);
     if (!buffer) return;
     void this.resumeContext();
 
@@ -297,7 +205,9 @@ export class AudioEngine {
     if (this.active.has(cue.id)) this.hardStop(cue.id);
 
     const now = this.ctx.currentTime;
-    const end = cue.endTime ?? buffer.duration;
+    // Clamp to the buffer: an endTime past the file's length would otherwise
+    // put the scheduled end-of-clip fade after the audio has already run out.
+    const end = Math.min(cue.endTime ?? buffer.duration, buffer.duration);
 
     let offset = fresh ? cue.startTime : (this.paused.get(cue.id) ?? cue.startTime);
     if (offset < cue.startTime || offset >= end) offset = cue.startTime;
@@ -329,10 +239,12 @@ export class AudioEngine {
       gain.gain.setValueAtTime(target, now);
     }
 
+    const playDur = Math.max(0, end - offset);
+
     if (cue.loop) {
       source.start(now, offset);
     } else {
-      source.start(now, offset, Math.max(0, end - offset));
+      source.start(now, offset, playDur);
     }
 
     const pb: Playback = {
@@ -342,8 +254,14 @@ export class AudioEngine {
       cue,
       startedAt: now,
       offset,
+      // ctx time this playback reaches its out point; 0 while looping, which
+      // never does.
+      endsAt: cue.loop ? 0 : now + playDur,
+      fadeFrom: now,
+      fadeUntil: now + fadeInSec,
       state: fadeInSec > 0 ? 'fadingIn' : 'playing',
       fadeInTimer: null,
+      endFadeTimer: null,
       stopTimer: null,
       stopping: false,
       stopMode: 'auto',
@@ -365,8 +283,49 @@ export class AudioEngine {
       }, cue.fadeIn * 1000);
     }
 
+    // Fade onto the out point, if asked for — never starting before the
+    // fade-in has finished.
+    this.scheduleEndFade(pb, now + fadeInSec);
+
     this.onStateChange?.(cue.id, pb.state);
     this.onCueEvent?.(cue.id, 'onStart');
+  }
+
+  /**
+   * Schedule the fade that lands on this playback's out point, if the cue asks
+   * for one. `from` is the earliest ctx time the fade may begin.
+   *
+   * Separate from start() because cancelling automation (finishing a fade-in
+   * early) wipes this ramp too, and it then has to be laid down again over
+   * whatever time is left.
+   */
+  private scheduleEndFade(pb: Playback, from: number): void {
+    const cue = pb.cue;
+    if (!cue.fadeOutOnEnd || cue.loop || cue.fadeOut <= 0 || pb.endsAt <= 0) return;
+
+    // Never longer than the audio that's left — resuming a few seconds from the
+    // end should fade over those seconds, not get cut off mid-ramp.
+    const fadeDur = Math.min(cue.fadeOut, pb.endsAt - from);
+    const start = Math.max(from, pb.endsAt - fadeDur);
+    if (start >= pb.endsAt) return;
+
+    pb.gain.gain.setValueAtTime(this.effectiveGain(cue), start);
+    pb.gain.gain.linearRampToValueAtTime(MIN_GAIN, pb.endsAt);
+
+    // The ramp above is on the audio clock; this only moves the tile into its
+    // fading-out look at the same moment.
+    if (pb.endFadeTimer !== null) clearTimeout(pb.endFadeTimer);
+    pb.endFadeTimer = window.setTimeout(
+      () => {
+        if (this.active.get(cue.id) !== pb || pb.stopping) return;
+        // Only now does this become the fade in progress — setting it at
+        // schedule time would clobber a fade-in that's still running.
+        pb.fadeFrom = start;
+        pb.fadeUntil = pb.endsAt;
+        this.setState(pb, 'fadingOut');
+      },
+      Math.max(0, (start - this.ctx.currentTime) * 1000),
+    );
   }
 
   /** Stop a cue. `fade` false => instant stop (trigger use).
@@ -380,6 +339,8 @@ export class AudioEngine {
     pb.stopMode = mode;
     const now = this.ctx.currentTime;
     const fadeOutSec = fade ? cue.fadeOut : 0;
+    pb.fadeFrom = now;
+    pb.fadeUntil = now + fadeOutSec;
 
     if (fadeOutSec > 0) {
       const current = Math.max(pb.gain.gain.value, MIN_GAIN);
@@ -421,10 +382,45 @@ export class AudioEngine {
     this.start(cue, fade, false);
   }
 
+  /**
+   * What a plain click does. Mid-fade, a second click completes the fade
+   * immediately rather than reversing it — press again to snap a cue that's
+   * easing in up to full level, or to cut short one that's on its way out.
+   */
   toggle(cue: AudioCue): void {
-    const state = this.getState(cue.id);
+    const pb = this.active.get(cue.id);
+    const state = pb?.state ?? 'idle';
     if (state === 'idle') this.start(cue);
+    else if (state === 'fadingIn') this.finishFadeIn(pb!);
+    else if (state === 'fadingOut') this.finishFadeOut(pb!);
     else this.stop(cue);
+  }
+
+  /** Jump a fading-in cue straight to its full level and keep it playing. */
+  private finishFadeIn(pb: Playback): void {
+    const now = this.ctx.currentTime;
+    pb.gain.gain.cancelScheduledValues(now);
+    pb.gain.gain.setValueAtTime(this.effectiveGain(pb.cue), now);
+    if (pb.fadeInTimer !== null) {
+      clearTimeout(pb.fadeInTimer);
+      pb.fadeInTimer = null;
+    }
+    pb.fadeFrom = pb.fadeUntil = 0; // the fade is over, not merely interrupted
+    this.setState(pb, 'playing');
+    // cancelScheduledValues wiped any end-of-clip fade; lay it down again over
+    // the time that's left.
+    this.scheduleEndFade(pb, now);
+  }
+
+  /** Cut a fading-out cue to silence now, finishing what the fade started. */
+  private finishFadeOut(pb: Playback): void {
+    // A deliberate stop already announced itself (stop() fires onStop/onPause
+    // the moment it's requested), so this only has to finalize. A cue drifting
+    // out on its own scheduled end-fade hasn't announced anything yet, so route
+    // it through a normal instant stop to fire the right event and honour the
+    // cue's own stop-vs-pause behaviour.
+    if (pb.stopping) this.finalize(pb, 'stopped');
+    else this.stop(pb.cue, false, 'auto');
   }
 
   /** Immediate teardown without firing onStop (used when restarting). */
@@ -433,6 +429,7 @@ export class AudioEngine {
     if (!pb) return;
     pb.finalized = true;
     if (pb.fadeInTimer !== null) clearTimeout(pb.fadeInTimer);
+    if (pb.endFadeTimer !== null) clearTimeout(pb.endFadeTimer);
     if (pb.stopTimer !== null) clearTimeout(pb.stopTimer);
     try {
       pb.source.stop();
@@ -449,6 +446,7 @@ export class AudioEngine {
     if (pb.finalized) return;
     pb.finalized = true;
     if (pb.fadeInTimer !== null) clearTimeout(pb.fadeInTimer);
+    if (pb.endFadeTimer !== null) clearTimeout(pb.endFadeTimer);
     if (pb.stopTimer !== null) clearTimeout(pb.stopTimer);
 
     const id = pb.cue.id;
@@ -479,11 +477,18 @@ export class AudioEngine {
     if (reason === 'natural') this.onCueEvent?.(id, 'onEnd');
   }
 
-  /** Stop everything and drop all decoded buffers (used on project reload). */
+  /** Stop everything and drop this engine's claims on every buffer it holds.
+   *  Buffers still referenced by another document stay decoded. */
   clear(): void {
     for (const id of [...this.active.keys()]) this.hardStop(id);
-    this.buffers.clear();
-    this.fileGains.clear();
+    for (const key of this.bindings.values()) audioCache.release(key);
+    this.bindings.clear();
     this.paused.clear();
+  }
+
+  /** Tear down for good (document closed). */
+  dispose(): void {
+    this.clear();
+    this.masterGain.disconnect();
   }
 }

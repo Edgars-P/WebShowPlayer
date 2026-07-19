@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from 'vite'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 
@@ -11,5 +12,12 @@ export default defineConfig({
         timer: 'timer.html',
       },
     },
+  },
+  test: {
+    include: ['src/**/*.test.ts'],
+    // The modules under test are plain logic over stubbed Web Audio and File
+    // System Access globals, so they need no DOM. The svelte plugin above
+    // compiles the runes in *.svelte.ts for us.
+    environment: 'node',
   },
 })

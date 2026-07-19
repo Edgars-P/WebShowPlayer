@@ -5,27 +5,40 @@
     const dot = name.lastIndexOf('.');
     return dot >= 0 ? name.slice(dot + 1).toUpperCase() : '';
   }
+
+  /** Files already open as a document tab — picking one just switches to it. */
+  let open = $derived(new Set(app.docs.map((d) => d.currentFileName).filter(Boolean)));
 </script>
 
 <div class="chooser">
   <div class="card">
     <h1>Choose a cue file</h1>
-    <p class="sub">This folder has several cue files. Pick one to open.</p>
+    {#if app.cueFiles.length === 0}
+      <p class="sub">This folder has no cue files yet — create one to get started.</p>
+    {:else}
+      <p class="sub">Pick one to open in a new tab. Several can be open at once.</p>
+    {/if}
 
     <ul class="list">
       {#each app.cueFiles as name (name)}
         <li>
           <button class="item" onclick={() => app.openCueFile(name)}>
             <span class="name">{name}</span>
-            <span class="badge" class:lsp={ext(name) === 'LSP'}>{ext(name)}</span>
+            <span class="tags">
+              {#if open.has(name)}<span class="badge open">OPEN</span>{/if}
+              <span class="badge" class:lsp={ext(name) === 'LSP'}>{ext(name)}</span>
+            </span>
           </button>
         </li>
       {/each}
     </ul>
 
     <div class="actions">
-      <button class="ghost" onclick={() => app.newCueFile()}>New cue file</button>
+      <button class="ghost" onclick={() => app.promptNewCueFile()}>New cue file…</button>
       <button class="ghost" onclick={() => app.openFolder()}>Open another folder…</button>
+      {#if app.docs.length > 0}
+        <button class="ghost" onclick={() => app.cancelChooser()}>Cancel</button>
+      {/if}
     </div>
     <p class="hint">.lsp files (Linux Show Player) are converted on open and saved as .wsp.</p>
   </div>
@@ -87,6 +100,15 @@
   .badge.lsp {
     color: var(--warn);
     border-color: var(--warn);
+  }
+  .tags {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .badge.open {
+    color: var(--accent);
+    border-color: var(--accent);
   }
   .actions {
     display: flex;
