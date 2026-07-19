@@ -89,8 +89,31 @@
   }
 </script>
 
+<!--
+  The wrapper fills the whole grid cell, including the space that reads as the
+  gap between tiles, and carries hover and click — Fitts's law: the gap is dead
+  pixels the pointer has to cross, so every one belongs to the nearest cue.
+
+  Dragging stays on the inner button, i.e. the visible tile only. Making the
+  wrapper the drag source broke Shift-drag: the browser resolves a modified
+  mousedown on a non-draggable wrapper as a selection gesture and swallows the
+  press. The tile is a big enough drag handle, and clicks on it bubble to the
+  wrapper, so there's one click path either way.
+-->
+<!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+<div
+  class="hit"
+  onclick={onClick}
+  onmouseenter={() => (app.hoveredCueId = cue.id)}
+  onmouseleave={() => {
+    if (app.hoveredCueId === cue.id) app.hoveredCueId = null;
+  }}
+  title={info.missing ? 'Media missing' : info.pending ? 'Loading media…' : stateTitle()}
+>
 <button
   class="cue"
+  draggable={app.dragModifier}
+  ondragstart={onDragStart}
   class:active
   class:selected={app.propertiesCueId === cue.id}
   class:missing={info.missing}
@@ -101,14 +124,6 @@
   style:--cue-bg={info.missing ? '#3a2020' : info.color}
   style:--cue-fg={fg(info.missing ? '#3a2020' : info.color)}
   style:--glow={glow}
-  draggable={app.dragModifier}
-  ondragstart={onDragStart}
-  onclick={onClick}
-  onmouseenter={() => (app.hoveredCueId = cue.id)}
-  onmouseleave={() => {
-    if (app.hoveredCueId === cue.id) app.hoveredCueId = null;
-  }}
-  title={info.missing ? 'Media missing' : info.pending ? 'Loading media…' : stateTitle()}
 >
   <span class="badges">
     {#if cue.type === 'proxy'}<span class="badge">⇄</span>{/if}
@@ -180,8 +195,26 @@
     {/key}
   {/if}
 </button>
+</div>
 
 <style>
+  /* The hit area: the entire cell. Its padding is half the visual gap, so
+     neighbouring hit areas meet exactly in the middle of the gap and no pixel
+     of the grid is dead. */
+  .hit {
+    display: block;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    padding: calc(var(--tile-gap, 8px) / 2);
+    cursor: pointer;
+    /* Nothing in a tile is worth selecting, and a stray selection here fights
+       the drag gesture. */
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
   .cue {
     position: relative;
     width: 100%;
@@ -202,8 +235,20 @@
     transition: filter 0.08s ease, box-shadow 0.07s linear;
     filter: brightness(0.82) saturate(0.9);
   }
-  .cue:hover {
+  /* Keyed off the hit area, not the tile — hovering the gap has to light the
+     tile, which is the whole point of extending the target. */
+  .hit:hover .cue,
+  .cue:focus-visible {
     filter: brightness(0.95);
+    box-shadow:
+      inset 0 0 0 2px rgba(255, 255, 255, 0.7),
+      inset 0 0 0 3px rgba(0, 0, 0, 0.5);
+    /* Hold the tile's own border: the global button:hover would otherwise
+       recolour it, but only when the pointer is over the tile and not the gap. */
+    border-color: rgba(255, 255, 255, 0.08);
+  }
+  .hit:hover .cue.missing {
+    border-color: var(--danger);
   }
   .cue.active {
     /* Brightness and glow spread track the live output loudness (--glow 0..1). */
@@ -315,8 +360,8 @@
        to the same blue — but a light/dark pair keeps contrast on every hue,
        so it can stay faint without ever vanishing. */
     box-shadow:
-      inset 0 0 0 1px rgba(255, 255, 255, 0.34),
-      inset 0 0 0 2px rgba(0, 0, 0, 0.28);
+      inset 0 0 0 1px rgba(255, 255, 255, 0.1),
+      inset 0 0 0 2px rgba(0, 0, 0, 0.1);
   }
   .cue.targeted::after {
     opacity: 1;
@@ -325,8 +370,8 @@
      association the badges carry, without relying on hue to be seen. */
   .cue.targeted.now::after {
     box-shadow:
-      inset 0 0 0 2px rgba(219, 234, 254, 0.92),
-      inset 0 0 0 3px rgba(0, 0, 0, 0.35);
+      inset 0 0 0 2px rgba(219, 234, 254, 0.3),
+      inset 0 0 0 3px rgba(0, 0, 0, 0.3);
   }
 
   /* Tucked into the top-right corner, clear of the type badges opposite and of

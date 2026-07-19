@@ -117,20 +117,25 @@
 
 <style>
   .grid {
+    /* The gap between tiles is drawn by each cell's own padding rather than by
+       grid-gap, so the cells tile the whole grid with no dead space between
+       them. Cues own the gap around them; see CueButton's hit area. */
+    --tile-gap: 8px;
     height: 100%;
     display: grid;
-    gap: 8px;
-    padding: 12px;
+    gap: 0;
+    padding: calc(12px - var(--tile-gap) / 2);
   }
   .cell {
     min-width: 0;
     min-height: 0;
     display: flex;
-    border-radius: 8px;
+    border-radius: 12px;
   }
   .cell.hover {
     outline: 2px dashed var(--accent);
-    outline-offset: -2px;
+    /* Pull the drop hint in to the visible tile edge, off the neighbours. */
+    outline-offset: calc(var(--tile-gap) / -2 - 2px);
     background: rgba(59, 130, 246, 0.12);
   }
   .cell > :global(*) {
@@ -142,10 +147,10 @@
     height: 100%;
   }
   /* Signals that tiles can be picked up while the modifier is held. */
-  .grid.dragready :global(.cue) {
+  .grid.dragready :global(.hit) {
     cursor: grab;
   }
-  .grid.dragready :global(.cue:active) {
+  .grid.dragready :global(.hit:active) {
     cursor: grabbing;
   }
 </style>
