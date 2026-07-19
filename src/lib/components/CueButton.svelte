@@ -12,9 +12,27 @@
   let info = $derived(app.display(cue));
   let flash = $derived(app.httpFlashes[cue.id]);
   let active = $derived(info.state !== 'idle');
-  // Resolve to the real audio cue (self, or a proxy's source) to read live level.
+  // Resolve to the real cue (self, or a proxy's source) to read its live state.
   let audioTarget = $derived(active ? app.resolveProxy(cue) : null);
-  let glow = $derived(audioTarget?.type === 'audio' ? app.level(audioTarget) : 0);
+  /**
+   * Audio glows with its own output loudness. Video can't: the element is on the
+   * other screen, and measuring it would mean routing that window's sound
+   * through an AudioContext just to light a tile over here. It gets a steady
+   * glow instead — enough to read as live across the room, with the progress bar
+   * carrying the detail.
+   */
+  const VIDEO_GLOW = 0.4;
+  let glow = $derived(
+    audioTarget?.type === 'audio'
+      ? app.level(audioTarget)
+      : audioTarget?.type === 'video'
+        ? // A held clip is still up, but it isn't going anywhere; it gets the
+          // ring without the pull of a full glow.
+          app.videoStatus.playing
+          ? VIDEO_GLOW
+          : VIDEO_GLOW / 3
+        : 0,
+  );
 
   // What the hovered tile's triggers would do to this one — empty unless some
   // other tile is hovered and drives this one.
@@ -49,6 +67,19 @@
 
   function hintTitle(h: (typeof hints)[number]): string {
     return `${EVENT_WORD[h.event]}, ${h.action} this cue${h.now ? ' — this click' : ''}`;
+  }
+
+  /** What a tile says when the cue has no name of its own. */
+  const DEFAULT_LABELS: Partial<Record<Cue['type'], string>> = {
+    http: 'HTTP',
+    timer: 'Timer',
+    video: 'Video',
+  };
+
+  /** Bare file name of a clip, without its folder path or extension. */
+  function clipName(file: string): string {
+    if (!file) return '(no clip)';
+    return file.split('/').pop()!.replace(/\.[^.]+$/, '');
   }
 
   const STATE_LABELS = {
@@ -129,6 +160,7 @@
     {#if cue.type === 'proxy'}<span class="badge">⇄</span>{/if}
     {#if cue.type === 'http'}<span class="badge">HTTP</span>{/if}
     {#if cue.type === 'timer'}<span class="badge">⏱ {cue.action}</span>{/if}
+    {#if cue.type === 'video'}<span class="badge">▶ video</span>{/if}
     {#if cue.type === 'global'}
       <span class="badge" title={cue.scope === 'all' ? 'Every open cue file' : 'This cue file'}>
         {cue.scope === 'all' ? '◎' : '◉'} all{cue.fade ? '' : ' ⚡'}
@@ -137,11 +169,37 @@
   </span>
 
   <span class="label"
-    >{info.name || (cue.type === 'http' ? 'HTTP' : cue.type === 'timer' ? 'Timer' : '—')}</span
+    >{info.name || DEFAULT_LABELS[cue.type] || '—'}</span
   >
 
   {#if cue.type === 'timer'}
     <span class="state">{cue.action === 'set' ? formatTime(cue.duration) : cue.action}</span>
+  {/if}
+
+  {#if cue.type === 'video'}
+    <span class="state">
+      {#if active}
+        <!-- On air. Same chip as a playing audio cue, so the two read alike
+             across the grid, with the clip's remaining time in place of a fade
+             bar — that's the number an operator is waiting on. -->
+        <span class="chip" class:chip-fadingOut={!app.videoStatus.playing}>
+          <span class="row">
+            <span class="glyph" aria-hidden="true">{app.videoStatus.playing ? '▶' : '⏸'}</span>
+            {app.videoStatus.playing ? 'on screen' : 'held'}
+          </span>
+          {#if app.videoStatus.duration > 0}
+            <span class="row">−{formatTime(app.videoStatus.duration - app.videoStatus.position)}</span>
+          {/if}
+        </span>
+      {:else}
+        <!-- The file name is what tells two otherwise identical unnamed clips
+             apart, so it stands in when the cue plays one. -->
+        {cue.action === 'play' ? clipName(cue.file) : cue.action}
+      {/if}
+    </span>
+    {#if active}
+      <span class="progress" style:width={`${app.videoProgressFraction * 100}%`}></span>
+    {/if}
   {/if}
 
   {#if cue.type === 'global'}

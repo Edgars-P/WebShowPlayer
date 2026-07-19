@@ -9,6 +9,7 @@
   import ContextMenu from './lib/components/ContextMenu.svelte';
   import CueFileChooser from './lib/components/CueFileChooser.svelte';
   import NewFilePrompt from './lib/components/NewFilePrompt.svelte';
+  import TrelloSidebar from './lib/components/TrelloSidebar.svelte';
 
   // Once anything is open the shell stays up; the chooser becomes an overlay so
   // opening a second cue file never tears down the documents already loaded.
@@ -40,6 +41,7 @@
       <main class="stage">
         <Launchpad />
       </main>
+      <TrelloSidebar />
     </div>
     {#if app.errorMessage}
       <div class="errbar">{app.errorMessage} <button class="ghost" onclick={() => (app.errorMessage = '')}>dismiss</button></div>

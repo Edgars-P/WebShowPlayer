@@ -1,7 +1,7 @@
 import { mount } from 'svelte'
-import TimerPage from './lib/timer/TimerPage.svelte'
+import ScreenPage from './lib/screen/ScreenPage.svelte'
 
-const app = mount(TimerPage, {
+const app = mount(ScreenPage, {
   target: document.getElementById('app')!,
 })
 

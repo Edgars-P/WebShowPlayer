@@ -4,13 +4,15 @@
 // mostly doesn't have to care.
 
 import { AudioEngine } from '../audio/AudioEngine';
-import { loadAudioBytes, writeCueFile, writeMediaFile } from '../fs/projectFs';
+import { loadAudioBytes, loadMediaFile, writeCueFile, writeMediaFile } from '../fs/projectFs';
+import type { VideoStatus } from '../screen/screen';
 import type { Folder } from './folder.svelte';
 import {
   defaultAudioCue,
   defaultHttpCue,
   defaultProxyCue,
   defaultTimerCue,
+  defaultVideoCue,
   makeId,
   defaultGlobalCue,
   type AudioCue,
@@ -27,6 +29,9 @@ import {
   type Trigger,
   type TriggerAction,
   type TriggerEvent,
+  type VideoAction,
+  type VideoCue,
+  type VideoFit,
 } from '../types';
 
 export interface HttpFlash {
@@ -55,18 +60,43 @@ export interface CueDisplay {
   pending: boolean;
 }
 
+/** Everything needed to put a clip on the screen, resolved from a video cue. */
+export interface VideoRequest {
+  /** The cue filling the slot, so its tile can show that it holds the screen. */
+  cueId: string;
+  file: File;
+  loop: boolean;
+  muted: boolean;
+  volume: number;
+  fit: VideoFit;
+}
+
 /**
- * The app-level services a document drives but doesn't own: the single global
- * countdown timer, and access to sibling documents for cross-document global
- * cues.
+ * The app-level services a document drives but doesn't own: the two single
+ * global slots the projector screen shows (the countdown timer and the video),
+ * and access to sibling documents for cross-document global cues.
  */
-export interface TimerHost {
+export interface ScreenHost {
   setTimer(seconds: number): void;
   pauseTimer(): void;
   resumeTimer(): void;
   clearTimer(): void;
   /** Register what to run when the countdown reaches zero on its own. */
   claimTimer(onFinished: () => void): void;
+  setVideo(req: VideoRequest): void;
+  pauseVideo(): void;
+  resumeVideo(): void;
+  clearVideo(): void;
+  /** Whether the given cue is the one holding the screen right now. */
+  ownsVideo(cueId: string): boolean;
+  /** Whether the slot is meant to be running (intent, not observation). */
+  readonly videoPlaying: boolean;
+  /** Live readout of the clip on screen — position, length, real play state. */
+  readonly videoStatus: VideoStatus;
+  /** Register what to run when the clip plays out on its own. */
+  claimVideo(onEnded: () => void): void;
+  /** Surface a failure to the operator, in the app-wide error bar. */
+  reportError(message: string): void;
   /** Every open document, including the caller. */
   eachDocument(fn: (doc: Doc) => void): void;
 }
@@ -117,16 +147,16 @@ export class Doc {
   /** Bumped by rAF while audio is playing so progress readouts stay live. */
   tick = $state(0);
 
-  private timerHost: TimerHost;
+  private host: ScreenHost;
   private rafId = 0;
 
   // Trigger re-entrancy guard.
   private firing = new Set<string>();
   private propagating = 0;
 
-  constructor(folder: Folder, project: Project, saveName: string, timerHost: TimerHost, sourceName: string | null = null) {
+  constructor(folder: Folder, project: Project, saveName: string, host: ScreenHost, sourceName: string | null = null) {
     this.folder = folder;
-    this.timerHost = timerHost;
+    this.host = host;
     this.project = project;
     this.saveName = saveName;
     this.currentFileName = sourceName;
@@ -313,6 +343,22 @@ export class Doc {
       const inner = this.display(src);
       return { ...inner, missing: false };
     }
+    if (cue.type === 'video') {
+      // A "play" cue with no resolvable clip is as broken as an audio cue with
+      // no file; the control actions need no file at all.
+      const missing = cue.action === 'play' && !this.resolveVideoPath(cue.file);
+      // Live whenever this cue's clip is the one on screen — including paused,
+      // which for video is not the same as gone: a held clip is still a picture
+      // in front of an audience, and the tile has to say so.
+      const live = this.host.ownsVideo(cue.id);
+      return {
+        name: cue.name,
+        color: cue.color,
+        state: live ? 'playing' : 'idle',
+        missing,
+        pending: false,
+      };
+    }
     if (cue.type === 'http' || cue.type === 'timer' || cue.type === 'global') {
       return { name: cue.name, color: cue.color, state: 'idle', missing: false, pending: false };
     }
@@ -431,6 +477,19 @@ export class Doc {
         this.applyTimerAction(target, action);
         this.fireTriggers(target.id, 'onStart');
       }
+    } else if (target.type === 'video') {
+      if (action === 'click') {
+        this.runVideoCue(target);
+      } else if (action === 'start' || action === 'set') {
+        this.applyVideoAction(target, 'play');
+        this.fireTriggers(target.id, 'onStart');
+      } else if (action === 'pause' || action === 'resume') {
+        this.applyVideoAction(target, action);
+        this.fireTriggers(target.id, 'onStart');
+      } else if (action === 'stop' || action === 'clear') {
+        this.applyVideoAction(target, 'clear');
+        this.fireTriggers(target.id, 'onStart');
+      }
     }
   }
 
@@ -438,19 +497,105 @@ export class Doc {
     switch (action) {
       case 'set':
         // Claim the shared timer so *this* document's cue chains off its end.
-        this.timerHost.claimTimer(() => this.propagate(() => this.fireTriggers(cue.id, 'onStop')));
-        this.timerHost.setTimer(cue.duration);
+        this.host.claimTimer(() => this.propagate(() => this.fireTriggers(cue.id, 'onStop')));
+        this.host.setTimer(cue.duration);
         break;
       case 'pause':
-        this.timerHost.pauseTimer();
+        this.host.pauseTimer();
         break;
       case 'resume':
-        this.timerHost.resumeTimer();
+        this.host.resumeTimer();
         break;
       case 'clear':
-        this.timerHost.clearTimer();
+        this.host.clearTimer();
         break;
     }
+  }
+
+  /**
+   * Apply a video action to the shared slot.
+   *
+   * Playing is asynchronous — the clip isn't pre-processed, so its bytes are
+   * opened at fire time — but nothing here waits on that. The cue's own onStart
+   * triggers run immediately, exactly as an HTTP cue's do, so a chain that puts
+   * a clip up and starts a bed of music underneath it doesn't stall on disk.
+   */
+  private applyVideoAction(cue: VideoCue, action: VideoAction): void {
+    switch (action) {
+      case 'play':
+        void this.startVideo(cue);
+        break;
+      case 'pause':
+        this.host.pauseVideo();
+        break;
+      case 'resume':
+        this.host.resumeVideo();
+        break;
+      case 'clear':
+        this.host.clearVideo();
+        break;
+    }
+  }
+
+  private async startVideo(cue: VideoCue): Promise<void> {
+    const path = this.resolveVideoPath(cue.file);
+    if (!path) {
+      // Straight to the app-wide bar: a cue that fails mid-show has to say so
+      // where the operator is already looking.
+      this.host.reportError(`Video cue “${cue.name || cue.id}” has no playable file.`);
+      return;
+    }
+    try {
+      const file = await loadMediaFile(this.folder.dir, path);
+      // Claim the shared slot so *this* document's cue chains off the clip's
+      // end, the same way a timer cue claims the countdown.
+      this.host.claimVideo(() => this.propagate(() => this.fireTriggers(cue.id, 'onEnd')));
+      this.host.setVideo({
+        cueId: cue.id,
+        file,
+        loop: cue.loop,
+        muted: cue.muted,
+        volume: cue.volume,
+        fit: cue.fit,
+      });
+    } catch (err) {
+      this.host.reportError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /** Best-effort resolve a video cue's file to an existing path. */
+  private resolveVideoPath(file: string): string | null {
+    if (!file) return null;
+    const files = this.folder.videoFiles;
+    if (files.includes(file)) return file;
+    const base = file.split('/').pop();
+    return files.find((f) => f.split('/').pop() === base) ?? null;
+  }
+
+  private runVideoCue(cue: VideoCue): void {
+    this.applyVideoAction(cue, this.videoClickAction(cue));
+    // Video cues can also chain onStart triggers.
+    this.fireTriggers(cue.id, 'onStart');
+  }
+
+  /**
+   * What clicking a video cue does right now — the video equivalent of an audio
+   * cue's toggle.
+   *
+   * A play cue that already holds the screen doesn't start its clip over; it
+   * ends it, the way clicking a playing audio cue stops it. Whether that means
+   * taking the picture off or freezing it is the cue's own onStopBehavior, and
+   * clicking a frozen clip picks it back up. The control actions are absolute —
+   * "clear screen" means clear the screen, whatever is on it.
+   *
+   * Decided from the opener's own intent rather than the screen's reported
+   * state, so a cue behaves the same whether or not the screen is open.
+   */
+  private videoClickAction(cue: VideoCue): VideoAction {
+    if (cue.action !== 'play') return cue.action;
+    if (!this.host.ownsVideo(cue.id)) return 'play';
+    if (!this.host.videoPlaying) return 'resume';
+    return cue.onStopBehavior === 'pause' ? 'pause' : 'clear';
   }
 
   /**
@@ -462,7 +607,7 @@ export class Doc {
    * sets off.
    */
   private runGlobalCue(cue: GlobalCue): void {
-    if (cue.scope === 'all') this.timerHost.eachDocument((doc) => doc.applyToAllAudio(cue.action, cue.fade));
+    if (cue.scope === 'all') this.host.eachDocument((doc) => doc.applyToAllAudio(cue.action, cue.fade));
     else this.applyToAllAudio(cue.action, cue.fade);
     // Global cues can also chain onStart triggers.
     this.fireTriggers(cue.id, 'onStart');
@@ -603,9 +748,11 @@ export class Doc {
           ? defaultProxyCue(row, col)
           : type === 'timer'
             ? defaultTimerCue(row, col)
-            : type === 'global'
-              ? defaultGlobalCue(row, col)
-              : defaultHttpCue(row, col);
+            : type === 'video'
+              ? defaultVideoCue(row, col)
+              : type === 'global'
+                ? defaultGlobalCue(row, col)
+                : defaultHttpCue(row, col);
     tab.cues.push(cue);
     this.markDirty();
     return cue.id;

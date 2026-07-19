@@ -69,6 +69,7 @@
         { label: 'Add audio cue', action: () => app.addNewCue('audio', row, col) },
         { label: 'Add proxy cue', action: () => app.addNewCue('proxy', row, col) },
         { label: 'Add timer cue', action: () => app.addNewCue('timer', row, col) },
+        { label: 'Add video cue', action: () => app.addNewCue('video', row, col) },
         { label: 'Add global cue', action: () => app.addNewCue('global', row, col) },
         { label: 'Add HTTP cue', action: () => app.addNewCue('http', row, col) },
       ];

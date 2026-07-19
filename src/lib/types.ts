@@ -1,6 +1,6 @@
 // Data model for the launchpad player. Cues are a discriminated union on `type`.
 
-export type CueType = 'audio' | 'proxy' | 'http' | 'timer' | 'global';
+export type CueType = 'audio' | 'proxy' | 'http' | 'timer' | 'video' | 'global';
 
 /** Durable address of another cue, by id — survives the cue being moved. */
 export interface CueRef {
@@ -94,6 +94,42 @@ export interface TimerCue extends BaseCue {
   duration: number;
 }
 
+/** Action a video cue performs on the single global video slot. */
+export type VideoAction = 'play' | 'pause' | 'resume' | 'clear';
+
+/** How a clip fills the screen: letterboxed whole, or cropped to fill. */
+export type VideoFit = 'contain' | 'cover';
+
+/**
+ * Puts a clip on the screen window (or controls the one already there). Like the
+ * timer there is exactly one video slot for the whole app, and video takes the
+ * screen over from the timer for as long as it holds it.
+ */
+export interface VideoCue extends BaseCue {
+  type: 'video';
+  name: string;
+  color: string;
+  action: VideoAction;
+  /** Filename relative to the project folder; used when action is "play". */
+  file: string;
+  loop: boolean;
+  /**
+   * 0..1, applied to the clip's own audio track. Video plays through the screen
+   * window's media element rather than the Web Audio graph, so this is
+   * independent of master volume and of every audio cue's level.
+   */
+  volume: number;
+  muted: boolean;
+  fit: VideoFit;
+  /**
+   * What clicking the cue again does while its clip holds the screen, mirroring
+   * an audio cue's toggle: "stop" takes the picture off, "pause" holds the frame
+   * so a third click resumes it. Only applies to the "play" action — the control
+   * actions mean exactly what they say. Absent (older saves) reads as "stop".
+   */
+  onStopBehavior: StopBehavior;
+}
+
 /**
  * What a global cue does to every audio cue in scope. These mirror the
  * equivalent trigger actions, but need no target — the target is "everything".
@@ -118,7 +154,7 @@ export interface GlobalCue extends BaseCue {
   scope: GlobalScope;
 }
 
-export type Cue = AudioCue | ProxyCue | HttpCue | TimerCue | GlobalCue;
+export type Cue = AudioCue | ProxyCue | HttpCue | TimerCue | VideoCue | GlobalCue;
 
 export interface Tab {
   id: string;
@@ -201,6 +237,25 @@ export function defaultTimerCue(row: number, col: number): TimerCue {
     color: '#8b5cf6',
     action: 'set',
     duration: 300,
+  };
+}
+
+export function defaultVideoCue(row: number, col: number): VideoCue {
+  return {
+    id: makeId('cue'),
+    type: 'video',
+    row,
+    col,
+    triggers: [],
+    name: '',
+    color: '#0ea5e9',
+    action: 'play',
+    file: '',
+    loop: false,
+    volume: 1,
+    muted: false,
+    fit: 'contain',
+    onStopBehavior: 'stop',
   };
 }
 

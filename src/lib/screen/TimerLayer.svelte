@@ -1,11 +1,10 @@
 <script lang="ts">
-  // Projector pop-out page (mounted at timer.html). Same-origin popup: reads its
-  // live state from a bridge the opener (TimerWindow.open) attaches to this window.
-  import { onDestroy, onMount } from 'svelte';
+  // The countdown half of the projector screen. Pure display: it's handed a
+  // TimerView and told whether it currently has the screen.
   import { scale } from 'svelte/transition';
-  import { formatTime, remainingFraction, timerColor, type TimerBridge, type TimerView } from './timer';
+  import { formatTime, remainingFraction, timerColor, type TimerView } from '../timer/timer';
 
-  let view = $state<TimerView>({ duration: 0, remaining: 0, running: false, finished: false });
+  let { view, hidden = false }: { view: TimerView; hidden?: boolean } = $props();
 
   // While running, we don't trust the (background-throttled) opener's push cadence
   // for the displayed value — we recompute `remaining` from the shared wall clock
@@ -30,7 +29,10 @@
   );
   let effective = $derived<TimerView>({ ...view, remaining });
 
-  let clear = $derived(view.duration <= 0 && !view.finished);
+  // `hidden` folds into the same "nothing to show" condition an unset timer
+  // already uses, so a video taking the screen floats the clock out exactly the
+  // way clearing it does.
+  let clear = $derived(hidden || (view.duration <= 0 && !view.finished));
   let paused = $derived(!clear && !view.finished && !view.running);
   let color = $derived(timerColor(effective));
   // timerColor's hue: 120 (green) → 0 (red). Only the red tail should glow, ramping
@@ -40,17 +42,6 @@
   let glowShadow = $derived(
     glow > 0 ? `0 0 ${(1 + glow * 5).toFixed(2)}vh rgba(255, 50, 50, ${(0.15 + glow * 5).toFixed(2)})` : 'none',
   );
-
-  let unsubscribe: (() => void) | null = null;
-
-  onMount(() => {
-    const bridge = (window.opener as unknown as { __timerBridge?: TimerBridge } | null)?.__timerBridge;
-    if (!bridge) return;
-    view = bridge.getSnapshot();
-    unsubscribe = bridge.subscribe((v) => (view = v));
-  });
-
-  onDestroy(() => unsubscribe?.());
 </script>
 
 <div class="wrap" class:paused class:finished={view.finished}>
@@ -75,23 +66,13 @@
 </div>
 
 <style>
-  :global(html),
-  :global(body),
-  :global(#app) {
-    margin: 0;
-    height: 100%;
-    background: #000;
-    overflow: hidden;
-  }
-
   .wrap {
-    position: relative;
-    height: 100%;
+    position: absolute;
+    inset: 0;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    background: #000;
     font-family: 'Bahnschrift', system-ui, sans-serif;
   }
 
@@ -120,7 +101,7 @@
     width: 100%;
     border-radius: inherit;
     /* The bar is scaled (not resized) per frame by requestAnimationFrame (see the
-       TimerPage script). transform: scaleX is a compositor-only property, so each
+       script above). transform: scaleX is a compositor-only property, so each
        frame skips layout and paint entirely — the GPU just re-composites the
        existing layer. Animating `width` instead would force a full layout+paint on
        every frame. Default transform-origin (centre) keeps the old symmetric shrink.

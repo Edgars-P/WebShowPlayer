@@ -1,5 +1,6 @@
 <script lang="ts">
   import { app } from '../state/project.svelte';
+  import { trello } from '../state/trello.svelte';
   import { formatTime, timerColor } from '../timer/timer';
 
   let project = $derived(app.project);
@@ -9,6 +10,16 @@
   let memory = $derived(app.audioMemory);
 
   const gb = (bytes: number) => (bytes / 1024 ** 3).toFixed(2);
+
+  // The video readout counts down the clip, so it reads like the timer beside
+  // it; the tooltip carries what that number is counting.
+  let videoTitle = $derived(
+    !app.videoActive
+      ? 'Nothing on the screen'
+      : app.videoStatus.duration > 0
+        ? `${app.videoStatus.playing ? 'Playing' : 'Held'} — ${formatTime(app.videoStatus.position)} of ${formatTime(app.videoStatus.duration)}`
+        : 'A clip holds the screen',
+  );
 </script>
 
 {#if project}
@@ -72,8 +83,51 @@
       <button class="ghost icon" title="Clear timer" disabled={!timerActive} onclick={() => app.clearTimer()}>
         ⏹
       </button>
-      <button class="ghost" title="Open projector window" onclick={() => app.openTimerWindow()}>
-        Pop-out
+    </div>
+
+    <div class="row timer">
+      <span class="clock video" class:live={app.videoActive} title={videoTitle}>
+        {#if app.videoActive && app.videoStatus.duration > 0}
+          {formatTime(app.videoStatus.duration - app.videoStatus.position)}
+        {:else if app.videoActive}
+          ▶ video
+        {:else}
+          ▢
+        {/if}
+      </span>
+      <button
+        class="ghost icon"
+        title={app.video.playing ? 'Pause clip' : 'Resume clip'}
+        disabled={!app.videoActive}
+        onclick={() => (app.video.playing ? app.pauseVideo() : app.resumeVideo())}
+      >
+        {app.video.playing ? '⏸' : '▶'}
+      </button>
+      <button
+        class="ghost icon"
+        title="Take the clip off the screen"
+        disabled={!app.videoActive}
+        onclick={() => app.clearVideo()}
+      >
+        ⏹
+      </button>
+      <button
+        class="ghost"
+        title="Open the projector screen — shows the timer, and any video cue that takes it over"
+        onclick={() => app.openScreenWindow()}
+      >
+        Screen
+      </button>
+    </div>
+
+    <div class="row">
+      <button
+        class="ghost"
+        class:on={trello.settings.enabled}
+        title="Follow the first list of a Trello board in a sidebar"
+        onclick={() => trello.toggleEnabled()}
+      >
+        Trello
       </button>
     </div>
 
@@ -145,6 +199,15 @@
     min-width: 56px;
     text-align: right;
   }
+  /* The video readout sits in the same slot as the clock, so the two groups
+     line up; it says only whether the screen is holding a picture. */
+  .clock.video {
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .clock.video.live {
+    color: var(--accent);
+  }
   .icon {
     padding: 4px 8px;
   }
@@ -157,5 +220,9 @@
   }
   .stopall:disabled {
     opacity: 0.4;
+  }
+  .on {
+    border-color: var(--accent);
+    color: var(--accent);
   }
 </style>

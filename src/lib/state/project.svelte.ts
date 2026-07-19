@@ -1,6 +1,7 @@
 // Central app state (Svelte 5 runes). Owns the list of open documents (one per
 // cue file), the folders they came from, and the genuinely global bits: the
-// countdown timer, the context menu, and the properties modal.
+// countdown timer, the video slot, the projector screen they share, the context
+// menu, and the properties modal.
 //
 // Most members here just forward to the active document, so components can keep
 // saying `app.project` / `app.markDirty()` without knowing that several
@@ -15,8 +16,9 @@ import {
   readCueFile,
 } from '../fs/projectFs';
 import { defaultProject, type Cue, type Tab, type TriggerAction } from '../types';
-import { TimerWindow, type TimerView } from '../timer/timer';
-import { Doc, type CueDisplay, type TriggerHint, type TimerHost } from './doc.svelte';
+import { EMPTY_TIMER, type TimerView } from '../timer/timer';
+import { EMPTY_VIDEO, IDLE_STATUS, ScreenWindow, type VideoStatus, type VideoView } from '../screen/screen';
+import { Doc, type CueDisplay, type TriggerHint, type ScreenHost, type VideoRequest } from './doc.svelte';
 import { Folder } from './folder.svelte';
 
 export type AppStatus = 'empty' | 'loading' | 'choosing' | 'ready' | 'error';
@@ -34,7 +36,7 @@ export interface ContextMenuState {
   items: MenuItem[];
 }
 
-export class AppState implements TimerHost {
+export class AppState implements ScreenHost {
   status = $state<AppStatus>('empty');
   errorMessage = $state('');
   /** Progress of a folder-level open, before a document exists to own it. */
@@ -66,22 +68,44 @@ export class AppState implements TimerHost {
   );
 
   /** The single global countdown timer slot, shared by all documents. */
-  timer = $state<TimerView>({ duration: 0, remaining: 0, running: false, finished: false });
+  timer = $state<TimerView>({ ...EMPTY_TIMER });
+  /** The single global video slot, shared by all documents. */
+  video = $state<VideoView>({ ...EMPTY_VIDEO });
+  /**
+   * What the clip on the screen is actually doing, reported back by the screen
+   * page each frame. The slot above is intent; this is the observation, and
+   * it's what the launchpad tile paints from.
+   */
+  videoStatus = $state<VideoStatus>({ ...IDLE_STATUS });
+  /** The video cue currently holding the slot, so its tile can show it. */
+  videoCueId = $state<string | null>(null);
   /** Bumped whenever decoded-audio residency changes, so readouts can react. */
   memoryVersion = $state(0);
 
   private folders: Folder[] = [];
   private timerEndsAt = 0;
   private timerInterval = 0;
-  private timerWindow = new TimerWindow();
+  private screenWindow = new ScreenWindow({
+    videoEnded: (generation) => this.videoEnded(generation),
+    videoProgress: (generation, status) => this.videoProgress(generation, status),
+    screenClosing: () => this.screenClosing(),
+  });
   /** What to run when the countdown reaches zero on its own — set by whichever
    *  document's timer cue last started it. */
   private onTimerFinished: (() => void) | null = null;
+  /** What to run when the clip plays out — set by whichever document's video
+   *  cue last filled the slot. */
+  private onVideoEnded: (() => void) | null = null;
 
   // ---- Documents ---------------------------------------------------------
 
   get activeDoc(): Doc | null {
     return this.docs.find((d) => d.id === this.activeDocId) ?? this.docs[0] ?? null;
+  }
+
+  /** Surface a document-level failure in the app-wide error bar. */
+  reportError(message: string): void {
+    this.errorMessage = message;
   }
 
   /** Every open document — used by global cues scoped to 'all'. */
@@ -158,8 +182,9 @@ export class AppState implements TimerHost {
       if (folder) {
         folder.cueFiles = opened.cueFiles;
         folder.audioFiles = opened.audioFiles;
+        folder.videoFiles = opened.videoFiles;
       } else {
-        folder = new Folder(opened.dir, opened.cueFiles, opened.audioFiles);
+        folder = new Folder(opened.dir, opened.cueFiles, opened.audioFiles, opened.videoFiles);
         this.folders.push(folder);
       }
 
@@ -351,6 +376,9 @@ export class AppState implements TimerHost {
   get audioFiles(): string[] {
     return this.activeDoc?.folder.audioFiles ?? [];
   }
+  get videoFiles(): string[] {
+    return this.activeDoc?.folder.videoFiles ?? [];
+  }
   /** Decode progress of the active document, falling back to the folder-level one. */
   get progressView(): { done: number; total: number } {
     const doc = this.activeDoc;
@@ -472,7 +500,7 @@ export class AppState implements TimerHost {
     this.timerEndsAt = Date.now() + dur * 1000;
     this.timer.endsAt = this.timerEndsAt;
     this.startTimerInterval();
-    this.renderTimer();
+    this.renderScreen();
   }
 
   pauseTimer(): void {
@@ -481,7 +509,7 @@ export class AppState implements TimerHost {
     this.timer.running = false;
     this.timer.endsAt = null;
     this.stopTimerInterval();
-    this.renderTimer();
+    this.renderScreen();
   }
 
   resumeTimer(): void {
@@ -490,7 +518,7 @@ export class AppState implements TimerHost {
     this.timerEndsAt = Date.now() + this.timer.remaining * 1000;
     this.timer.endsAt = this.timerEndsAt;
     this.startTimerInterval();
-    this.renderTimer();
+    this.renderScreen();
   }
 
   clearTimer(): void {
@@ -501,15 +529,21 @@ export class AppState implements TimerHost {
     this.timer.endsAt = null;
     this.onTimerFinished = null;
     this.stopTimerInterval();
-    this.renderTimer();
+    this.renderScreen();
   }
 
-  openTimerWindow(): void {
-    if (!this.timerWindow.open()) {
-      this.errorMessage = 'Timer pop-out was blocked. Allow popups for this site and try again.';
+  /** Whether the projector window is currently up. */
+  get screenOpen(): boolean {
+    return this.screenWindow.isOpen();
+  }
+
+  openScreenWindow(): void {
+    if (!this.screenWindow.open()) {
+      this.errorMessage = 'Screen pop-out was blocked. Allow popups for this site and try again.';
       return;
     }
-    this.renderTimer();
+    // Catch the new window up on whatever the slots already hold.
+    this.renderScreen();
   }
 
   private timerTick(): void {
@@ -524,7 +558,7 @@ export class AppState implements TimerHost {
       this.onTimerFinished = null;
       finished?.();
     }
-    this.renderTimer();
+    this.renderScreen();
   }
 
   private startTimerInterval(): void {
@@ -539,8 +573,121 @@ export class AppState implements TimerHost {
     }
   }
 
-  private renderTimer(): void {
-    this.timerWindow.render($state.snapshot(this.timer));
+  // ---- Global video ------------------------------------------------------
+
+  /** Whether a clip currently holds the screen. */
+  get videoActive(): boolean {
+    return this.video.file != null;
+  }
+
+  /** Whether the given cue is the one holding the screen right now. */
+  ownsVideo(cueId: string): boolean {
+    return this.videoCueId === cueId && this.video.file != null;
+  }
+
+  /** Whether the slot is meant to be running (intent, not observation). */
+  get videoPlaying(): boolean {
+    return this.video.playing;
+  }
+
+  /** How far through the clip, 0..1 — the video cue's progress bar. */
+  get videoProgressFraction(): number {
+    const { position, duration } = this.videoStatus;
+    if (duration <= 0) return 0;
+    return Math.min(1, Math.max(0, position / duration));
+  }
+
+  claimVideo(onEnded: () => void): void {
+    this.onVideoEnded = onEnded;
+  }
+
+  /**
+   * Put a clip on the screen, replacing whatever was there. One slot, like the
+   * timer: a second video cue takes the screen over rather than sharing it.
+   */
+  setVideo(req: VideoRequest): void {
+    this.video.file = req.file;
+    // A fresh generation even for the same File, so re-firing a cue restarts
+    // the clip instead of leaving it parked on its last frame.
+    this.video.generation++;
+    this.video.playing = true;
+    this.video.loop = req.loop;
+    this.video.muted = req.muted;
+    this.video.volume = req.volume;
+    this.video.fit = req.fit;
+    this.videoCueId = req.cueId;
+    // Nothing measured yet: the old clip's position must not leak into the new
+    // cue's tile for the frame or two before the screen reports back.
+    this.videoStatus = { ...IDLE_STATUS };
+    this.renderScreen();
+    if (!this.screenWindow.isOpen()) {
+      // The slot is filled and will start the moment the screen opens, but
+      // right now nothing is on any screen — say so rather than let the tile
+      // imply a clip is up in front of an audience.
+      this.errorMessage = 'No screen window open — the clip will start when you open it.';
+    }
+  }
+
+  pauseVideo(): void {
+    if (!this.video.file || !this.video.playing) return;
+    this.video.playing = false;
+    this.renderScreen();
+  }
+
+  resumeVideo(): void {
+    if (!this.video.file || this.video.playing) return;
+    this.video.playing = true;
+    this.renderScreen();
+  }
+
+  clearVideo(): void {
+    this.video.file = null;
+    this.video.playing = false;
+    // Bumped on the way out too, so an `ended` report still in flight for the
+    // clip we just pulled is recognisable as stale.
+    this.video.generation++;
+    this.videoCueId = null;
+    this.videoStatus = { ...IDLE_STATUS };
+    this.onVideoEnded = null;
+    this.renderScreen();
+  }
+
+  /**
+   * The screen page reporting that a clip played out. The picture leaves the
+   * screen — a show shouldn't be left holding a frozen last frame — which also
+   * floats the timer back in behind it.
+   */
+  private videoEnded(generation: number): void {
+    if (generation !== this.video.generation) return; // stale: already replaced
+    const ended = this.onVideoEnded;
+    this.clearVideo();
+    ended?.();
+  }
+
+  /** Live readout from the screen page, for the clip it's actually showing. */
+  private videoProgress(generation: number, status: VideoStatus): void {
+    if (generation !== this.video.generation) return; // stale: already replaced
+    this.videoStatus = status;
+  }
+
+  /**
+   * The screen window went away. Whatever it was showing is gone with it, so
+   * the slot empties — but silently: the clip didn't reach its end, so its
+   * onEnd chain must not fire.
+   */
+  private screenClosing(): void {
+    if (!this.video.file) return;
+    this.clearVideo();
+  }
+
+  private renderScreen(): void {
+    this.screenWindow.render({
+      timer: $state.snapshot(this.timer),
+      // A shallow copy, not $state.snapshot: the view is flat, and snapshotting
+      // would structuredClone the File — copying the entire clip's bytes on
+      // every push, several times a second while the timer runs.
+      video: { ...this.video },
+    });
   }
 }
 

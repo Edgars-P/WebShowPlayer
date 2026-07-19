@@ -11,6 +11,9 @@
     StopBehavior,
     TimerAction,
     TimerCue,
+    VideoAction,
+    VideoCue,
+    VideoFit,
   } from '../types';
   import CuePicker from './CuePicker.svelte';
   import TriggerEditor from './TriggerEditor.svelte';
@@ -187,6 +190,92 @@
               <label>Duration (s)</label>
               <input type="number" min="0" step="1" bind:value={c.duration} oninput={() => app.markDirty()} />
             </div>
+          {/if}
+        {:else if cue.type === 'video'}
+          {@const c = cue as VideoCue}
+          <p class="hint">
+            Puts a clip on the screen pop-out. There's one video slot for the whole app, and it
+            outranks the timer — the clock floats out while the picture is up, and back in when it
+            goes. Clips play straight off disk, so nothing is loaded until the cue fires.
+          </p>
+          <div class="field">
+            <label>Name</label>
+            <input bind:value={c.name} oninput={() => app.markDirty()} placeholder="(unnamed)" />
+          </div>
+          <div class="field">
+            <label>Colour</label>
+            <input type="color" bind:value={c.color} oninput={() => app.markDirty()} />
+          </div>
+          <div class="field">
+            <label>Action</label>
+            <select bind:value={c.action} onchange={() => app.markDirty()}>
+              <option value={'play' as VideoAction}>Play clip</option>
+              <option value={'pause' as VideoAction}>Pause</option>
+              <option value={'resume' as VideoAction}>Resume</option>
+              <option value={'clear' as VideoAction}>Clear screen</option>
+            </select>
+          </div>
+          {#if c.action === 'play'}
+            <div class="field">
+              <label>Clip</label>
+              <select bind:value={c.file} onchange={() => app.markDirty()}>
+                <option value="">— none —</option>
+                {#each app.videoFiles as f (f)}
+                  <option value={f}>{f}</option>
+                {/each}
+              </select>
+              {#if app.videoFiles.length === 0}
+                <span class="hint">No video files in this project folder.</span>
+              {/if}
+            </div>
+            <div class="grid2">
+              <label class="check">
+                <input type="checkbox" bind:checked={c.loop} onchange={() => app.markDirty()} /> Loop
+              </label>
+              <div class="field">
+                <label>Fit</label>
+                <select bind:value={c.fit} onchange={() => app.markDirty()}>
+                  <option value={'contain' as VideoFit}>Fit (letterbox)</option>
+                  <option value={'cover' as VideoFit}>Fill (crop)</option>
+                </select>
+              </div>
+            </div>
+            <div class="field">
+              <label>On click while it's up</label>
+              <select bind:value={c.onStopBehavior} onchange={() => app.markDirty()}>
+                <option value={'stop' as StopBehavior}>Clear the screen</option>
+                <option value={'pause' as StopBehavior}>Hold the frame (click to resume)</option>
+              </select>
+              <span class="hint">
+                {c.onStopBehavior === 'pause'
+                  ? 'Clicking again freezes the clip on screen; a third click picks it up where it left off.'
+                  : 'Clicking again takes the picture off the screen.'}
+              </span>
+            </div>
+            <div class="field">
+              <label>Volume: {c.muted ? 'muted' : `${Math.round(c.volume * 100)}%`}</label>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                disabled={c.muted}
+                bind:value={c.volume}
+                oninput={() => app.markDirty()}
+              />
+            </div>
+            <label class="check">
+              <input type="checkbox" bind:checked={c.muted} onchange={() => app.markDirty()} /> Mute
+            </label>
+            <span class="hint">
+              The clip's own soundtrack plays through the screen window, not the audio engine — so
+              master volume, fades, and “stop all” don't reach it.
+            </span>
+            <span class="hint">
+              Ends by itself: the clip leaves the screen when it finishes, firing its
+              <em>on end</em> triggers. That needs the screen window open — with it closed, a clip
+              never plays and never ends.
+            </span>
           {/if}
         {:else if cue.type === 'global'}
           {@const c = cue as GlobalCue}

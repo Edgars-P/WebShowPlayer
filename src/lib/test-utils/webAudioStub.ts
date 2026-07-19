@@ -143,19 +143,30 @@ export interface FakeFolderSpec {
   cueFiles: Record<string, string>;
   /** Audio file names present in the folder. */
   audioFiles: string[];
+  /** Video file names present in the folder. */
+  videoFiles?: string[];
 }
 
 /** A directory handle backed by an in-memory listing. */
 export function makeFakeDir(spec: FakeFolderSpec, counters?: { reads: number }) {
   const written: Record<string, string> = {};
+  const videoFiles = spec.videoFiles ?? [];
   const dir: Record<string, unknown> = {
     name: spec.name ?? 'show-folder',
     isSameEntry: async (other: unknown) => other === dir,
     async getFileHandle(name: string, options?: { create?: boolean }) {
-      const known = name in spec.cueFiles || spec.audioFiles.includes(name) || name in written;
+      const known =
+        name in spec.cueFiles ||
+        spec.audioFiles.includes(name) ||
+        videoFiles.includes(name) ||
+        name in written;
       if (!known && !options?.create) throw new Error(`no such file: ${name}`);
       return {
+        // Stands in for a File. Video never reads the bytes on this side — the
+        // screen page turns whatever comes back into an object URL — so the
+        // name is enough for a test to tell one clip from another.
         getFile: async () => ({
+          name,
           text: async () => written[name] ?? spec.cueFiles[name] ?? '',
           arrayBuffer: async () => {
             if (counters) counters.reads++;
@@ -171,7 +182,12 @@ export function makeFakeDir(spec: FakeFolderSpec, counters?: { reads: number }) 
       };
     },
     async *values() {
-      for (const n of [...Object.keys(spec.cueFiles), ...Object.keys(written), ...spec.audioFiles]) {
+      for (const n of [
+        ...Object.keys(spec.cueFiles),
+        ...Object.keys(written),
+        ...spec.audioFiles,
+        ...videoFiles,
+      ]) {
         yield { kind: 'file', name: n };
       }
     },

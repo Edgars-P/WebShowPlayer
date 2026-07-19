@@ -22,6 +22,10 @@
       { value: 'onStart', label: 'After it runs' },
       { value: 'onStop', label: 'After it runs out' },
     ],
+    video: [
+      { value: 'onStart', label: 'After it runs' },
+      { value: 'onEnd', label: 'After the clip ends on its own' },
+    ],
     http: [{ value: 'onStart', label: 'After it fires' }],
     global: [{ value: 'onStart', label: 'After it runs' }],
   };
@@ -46,6 +50,13 @@
     { value: 'resume', label: 'Resume' },
     { value: 'clear', label: 'Clear' },
   ];
+  const VIDEO_ACTIONS: ActionOption[] = [
+    { value: 'click', label: "Click (its own action)" },
+    { value: 'start', label: 'Play its clip' },
+    { value: 'pause', label: 'Pause' },
+    { value: 'resume', label: 'Resume' },
+    { value: 'clear', label: 'Clear screen' },
+  ];
   const HTTP_ACTIONS: ActionOption[] = [{ value: 'click', label: 'Fire request' }];
   // A global cue carries its own action and scope, so a trigger just runs it.
   const GLOBAL_ACTIONS: ActionOption[] = [{ value: 'click', label: 'Run (its own action)' }];
@@ -56,6 +67,7 @@
     const effective = targetCue ? app.resolveProxy(targetCue) : null;
     if (effective?.type === 'audio') return AUDIO_ACTIONS;
     if (effective?.type === 'timer') return TIMER_ACTIONS;
+    if (effective?.type === 'video') return VIDEO_ACTIONS;
     if (effective?.type === 'http') return HTTP_ACTIONS;
     if (effective?.type === 'global') return GLOBAL_ACTIONS;
     return FALLBACK_ACTIONS;

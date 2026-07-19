@@ -1,7 +1,6 @@
-// Global countdown timer: shared formatting/colour helpers plus a projector
-// pop-out window. The pop-out is a real Svelte page (timer.html / TimerPage.svelte);
-// this module just opens it and reads state back via a bridge object exposed on
-// *this* (opener) window, which the popup reaches via `window.opener`.
+// Global countdown timer: the shape of its state, plus the formatting and
+// colour helpers the toolbar and the projector screen both render it with.
+// The screen window that displays it lives in ../screen/screen.
 
 export interface TimerView {
   duration: number;
@@ -16,12 +15,6 @@ export interface TimerView {
    * throttled) opener pushes snapshots. Ignored unless `running` is true.
    */
   endsAt?: number | null;
-}
-
-export interface TimerBridge {
-  getSnapshot(): TimerView;
-  /** Subscribe to live updates; returns an unsubscribe function. */
-  subscribe(cb: (v: TimerView) => void): () => void;
 }
 
 export function formatTime(seconds: number): string {
@@ -46,54 +39,9 @@ export function timerColor(v: TimerView): string {
   return `hsl(${hue} 90% 55%)`;
 }
 
-const EMPTY_VIEW: TimerView = { duration: 0, remaining: 0, running: false, finished: false };
-
-export class TimerWindow {
-  private win: Window | null = null;
-  private lastView: TimerView = EMPTY_VIEW;
-  private listeners = new Set<(v: TimerView) => void>();
-
-  constructor() {
-    // Expose the bridge on *our own* window, not the popup's. `window.open(url)`
-    // navigates the popup to a fresh document (and thus a fresh global `window`),
-    // which would wipe out any property set on its window handle right after
-    // open() returns. This window never navigates, so it's stable — the popup
-    // reads it back via `window.opener` once its own script starts.
-    const bridge: TimerBridge = {
-      getSnapshot: () => this.lastView,
-      subscribe: (cb) => {
-        this.listeners.add(cb);
-        return () => this.listeners.delete(cb);
-      },
-    };
-    (window as unknown as { __timerBridge: TimerBridge }).__timerBridge = bridge;
-  }
-
-  isOpen(): boolean {
-    return !!this.win && !this.win.closed;
-  }
-
-  /** Open (or focus) the pop-out. Returns false if the popup was blocked. */
-  open(): boolean {
-    if (this.isOpen()) {
-      this.win!.focus();
-      return true;
-    }
-    const win = window.open('/timer.html', 'show-timer', 'width=900,height=520');
-    if (!win) return false;
-    this.win = win;
-    return true;
-  }
-
-  render(v: TimerView): void {
-    this.lastView = v;
-    if (!this.isOpen()) return;
-    for (const cb of this.listeners) cb(v);
-  }
-
-  close(): void {
-    if (this.isOpen()) this.win!.close();
-    this.win = null;
-    this.listeners.clear();
-  }
-}
+export const EMPTY_TIMER: TimerView = {
+  duration: 0,
+  remaining: 0,
+  running: false,
+  finished: false,
+};
