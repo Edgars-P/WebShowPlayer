@@ -79,6 +79,11 @@ export class AppState implements ScreenHost {
   videoStatus = $state<VideoStatus>({ ...IDLE_STATUS });
   /** The video cue currently holding the slot, so its tile can show it. */
   videoCueId = $state<string | null>(null);
+  /**
+   * Whether a screen page is attached. Video cues need somewhere to put a
+   * picture, so without one they don't run at all — and their tiles say so.
+   */
+  screenLive = $state(false);
   /** Bumped whenever decoded-audio residency changes, so readouts can react. */
   memoryVersion = $state(0);
 
@@ -89,6 +94,12 @@ export class AppState implements ScreenHost {
     videoEnded: (generation) => this.videoEnded(generation),
     videoProgress: (generation, status) => this.videoProgress(generation, status),
     screenClosing: () => this.screenClosing(),
+    livenessChanged: (live) => {
+      this.screenLive = live;
+      // A screen that goes away takes its picture with it; one that arrives
+      // needs catching up on whatever the slots already hold.
+      if (live) this.renderScreen();
+    },
   });
   /** What to run when the countdown reaches zero on its own — set by whichever
    *  document's timer cue last started it. */
@@ -532,11 +543,6 @@ export class AppState implements ScreenHost {
     this.renderScreen();
   }
 
-  /** Whether the projector window is currently up. */
-  get screenOpen(): boolean {
-    return this.screenWindow.isOpen();
-  }
-
   openScreenWindow(): void {
     if (!this.screenWindow.open()) {
       this.errorMessage = 'Screen pop-out was blocked. Allow popups for this site and try again.';
@@ -620,12 +626,6 @@ export class AppState implements ScreenHost {
     // cue's tile for the frame or two before the screen reports back.
     this.videoStatus = { ...IDLE_STATUS };
     this.renderScreen();
-    if (!this.screenWindow.isOpen()) {
-      // The slot is filled and will start the moment the screen opens, but
-      // right now nothing is on any screen — say so rather than let the tile
-      // imply a clip is up in front of an audience.
-      this.errorMessage = 'No screen window open — the clip will start when you open it.';
-    }
   }
 
   pauseVideo(): void {

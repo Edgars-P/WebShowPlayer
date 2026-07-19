@@ -94,6 +94,11 @@ export interface ScreenReports {
   videoEnded(generation: number): void;
   videoProgress(generation: number, status: VideoStatus): void;
   screenClosing(): void;
+  /**
+   * A screen page attached or detached. Video cues are inert without one, so
+   * this has to be a push rather than something the app polls for.
+   */
+  livenessChanged(live: boolean): void;
 }
 
 export class ScreenWindow {
@@ -111,7 +116,11 @@ export class ScreenWindow {
       getSnapshot: () => this.lastView,
       subscribe: (cb) => {
         this.listeners.add(cb);
-        return () => this.listeners.delete(cb);
+        reports.livenessChanged(true);
+        return () => {
+          this.listeners.delete(cb);
+          reports.livenessChanged(this.listeners.size > 0);
+        };
       },
       videoEnded: (generation) => reports.videoEnded(generation),
       videoProgress: (generation, status) => reports.videoProgress(generation, status),
@@ -121,15 +130,15 @@ export class ScreenWindow {
   }
 
   /**
-   * Whether a screen is live.
+   * Whether a screen page is attached and listening.
    *
-   * A subscribed page counts even when we hold no handle to its window: after
-   * the opener reloads (or hot-reloads) the popup outlives us and re-attaches
-   * itself to the new bridge, so a live subscription is the more truthful
-   * signal of the two.
+   * Deliberately *not* "do we hold a window handle": after the opener reloads,
+   * the popup outlives it and re-attaches to the new bridge, so there's a real
+   * screen with no handle to it. A live subscription is the truthful signal,
+   * and unlike a window handle it changes by event rather than needing a poll.
    */
-  isOpen(): boolean {
-    return this.listeners.size > 0 || this.hasWindow();
+  isLive(): boolean {
+    return this.listeners.size > 0;
   }
 
   private hasWindow(): boolean {
@@ -156,7 +165,7 @@ export class ScreenWindow {
   }
 
   close(): void {
-    if (this.isOpen()) this.win!.close();
+    if (this.hasWindow()) this.win!.close();
     this.win = null;
     this.listeners.clear();
   }

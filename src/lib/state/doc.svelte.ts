@@ -58,6 +58,12 @@ export interface CueDisplay {
   missing: boolean;
   /** Media is still being read/decoded — not an error, just not ready yet. */
   pending: boolean;
+  /**
+   * Why this cue can't run right now, or null/absent when it can. Distinct from
+   * `missing`, which is a problem with the cue itself: this is the world not
+   * being ready for it, and it comes and goes without the cue changing.
+   */
+  unavailable?: string | null;
 }
 
 /** Everything needed to put a clip on the screen, resolved from a video cue. */
@@ -91,6 +97,8 @@ export interface ScreenHost {
   ownsVideo(cueId: string): boolean;
   /** Whether the slot is meant to be running (intent, not observation). */
   readonly videoPlaying: boolean;
+  /** Whether a screen page is attached; video cues do nothing without one. */
+  readonly screenLive: boolean;
   /** Live readout of the clip on screen — position, length, real play state. */
   readonly videoStatus: VideoStatus;
   /** Register what to run when the clip plays out on its own. */
@@ -357,6 +365,9 @@ export class Doc {
         state: live ? 'playing' : 'idle',
         missing,
         pending: false,
+        unavailable: this.host.screenLive
+          ? null
+          : 'No screen to play on — open the screen window from the toolbar.',
       };
     }
     if (cue.type === 'http' || cue.type === 'timer' || cue.type === 'global') {
@@ -478,6 +489,11 @@ export class Doc {
         this.fireTriggers(target.id, 'onStart');
       }
     } else if (target.type === 'video') {
+      // No screen, no video cue. Filling the slot with a clip nobody can see
+      // would light the tile as if a picture were up in front of an audience,
+      // and chain its triggers off a clip that never plays — so the whole cue
+      // sits out, triggers included, until there's somewhere to put it.
+      if (!this.host.screenLive) return;
       if (action === 'click') {
         this.runVideoCue(target);
       } else if (action === 'start' || action === 'set') {

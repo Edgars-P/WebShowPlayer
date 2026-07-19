@@ -3,7 +3,7 @@
 // the way the screen page does — including reporting a finished clip through the
 // bridge, which is the only way the opener ever learns a video ended.
 
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { installAudioStubs, makeFakeDir } from '../test-utils/webAudioStub';
 import type { ScreenBridge } from '../screen/screen';
 
@@ -110,13 +110,22 @@ async function fire(doc: ReturnType<typeof docA>, id: string) {
 }
 
 describe('video cues', () => {
+  // Video cues are inert without a screen page attached, so every case that
+  // expects one to *do* something needs a stand-in for that page. This is the
+  // same subscription a real screen makes.
+  let detachScreen: (() => void) | null = null;
+
   beforeEach(() => {
     // Every slot back to empty: several cases assert that a chain did *not*
     // fire, which only means anything from a known-quiet start.
+    detachScreen?.();
+    detachScreen = bridge().subscribe(() => {});
     app.clearVideo();
     app.clearTimer();
     app.stopAllAudio(false);
   });
+
+  afterAll(() => detachScreen?.());
 
   it('puts its clip on the screen, carrying the cue’s playback settings', async () => {
     await fire(docA(), 'v-play-b');
@@ -398,14 +407,8 @@ describe('video cues', () => {
     // What the opener is left with after a reload: the popup outlives it and
     // re-attaches to the new bridge, so there's a live screen but no window
     // handle to it. A subscription is the only evidence, and it has to count.
-    it('counts as a screen, so firing a clip raises no warning', async () => {
-      const stop = bridge().subscribe(() => {});
-      app.errorMessage = '';
-
-      await fire(docA(), 'v-play');
-
-      expect(app.errorMessage).toBe('');
-      stop();
+    it('counts as a screen, so cues run', () => {
+      expect(app.screenLive).toBe(true);
     });
 
     it('receives the slot state it needs to show', async () => {
@@ -421,26 +424,67 @@ describe('video cues', () => {
       expect(seen.at(-1)).toBe('blank');
       stop();
     });
-
-    it('is no longer a screen once it drops its subscription', async () => {
-      const stop = bridge().subscribe(() => {});
-      stop();
-      app.errorMessage = '';
-
-      await fire(docA(), 'v-play');
-
-      expect(app.errorMessage).toMatch(/no screen window/i);
-    });
   });
 
-  it('says so when a clip is fired with no screen to put it on', async () => {
-    app.errorMessage = '';
-    await fire(docA(), 'v-play');
+  describe('with no screen attached', () => {
+    /** Run a case with the stand-in screen detached, as if it were closed. */
+    async function withoutScreen(fn: () => Promise<void> | void) {
+      detachScreen?.();
+      detachScreen = null;
+      try {
+        await fn();
+      } finally {
+        detachScreen = bridge().subscribe(() => {});
+      }
+    }
 
-    // The slot is held, ready for the screen to open — but the operator is told
-    // rather than left with a tile implying a picture is up.
-    expect(app.errorMessage).toMatch(/no screen window/i);
-    expect(app.videoActive).toBe(true);
+    it('a video cue does nothing at all — no clip, no error bar', async () => {
+      await withoutScreen(async () => {
+        expect(app.screenLive).toBe(false);
+        app.errorMessage = '';
+
+        await fire(docA(), 'v-play');
+
+        // Nothing loaded, and no nagging: the cue simply has nowhere to run.
+        expect(app.videoActive).toBe(false);
+        expect(app.errorMessage).toBe('');
+      });
+    });
+
+    it('does not fire its triggers either', async () => {
+      const v = cueIn(docA(), 'v-play') as unknown as { triggers: unknown[] };
+      v.triggers = [{ event: 'onStart', target: { cueId: 'a-a' }, action: 'start' }];
+
+      await withoutScreen(async () => {
+        await fire(docA(), 'v-play');
+        // Chaining music off a clip that never plays would put the show out of
+        // step with what the audience sees.
+        expect(docA().playStates['a-a'] ?? 'idle').toBe('idle');
+      });
+
+      v.triggers = [];
+    });
+
+    it('marks video tiles unavailable, saying why', async () => {
+      await withoutScreen(() => {
+        const info = docA().display(cueIn(docA(), 'v-play'));
+        expect(info.unavailable).toMatch(/no screen/i);
+        // Not the same as broken: the cue itself is fine.
+        expect(info.missing).toBe(false);
+      });
+    });
+
+    it('leaves the tiles available again once a screen attaches', () => {
+      expect(docA().display(cueIn(docA(), 'v-play')).unavailable).toBe(null);
+    });
+
+    it('leaves audio cues alone — they need no screen', async () => {
+      await withoutScreen(() => {
+        docA().activate(cueIn(docA(), 'a-a'));
+        expect(docA().playStates['a-a']).toBe('playing');
+        expect(docA().display(cueIn(docA(), 'a-a')).unavailable).toBeFalsy();
+      });
+    });
   });
 
   it('fires its own onStart triggers when run, without waiting on the file', () => {

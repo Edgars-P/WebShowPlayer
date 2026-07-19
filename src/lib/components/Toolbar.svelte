@@ -113,7 +113,10 @@
       </button>
       <button
         class="ghost"
-        title="Open the projector screen — shows the timer, and any video cue that takes it over"
+        class:on={app.screenLive}
+        title={app.screenLive
+          ? 'Screen is up — focus it'
+          : 'Open the projector screen. Video cues need it: without a screen they do nothing.'}
         onclick={() => app.openScreenWindow()}
       >
         Screen

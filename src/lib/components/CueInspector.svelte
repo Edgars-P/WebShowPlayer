@@ -196,7 +196,8 @@
           <p class="hint">
             Puts a clip on the screen pop-out. There's one video slot for the whole app, and it
             outranks the timer — the clock floats out while the picture is up, and back in when it
-            goes. Clips play straight off disk, so nothing is loaded until the cue fires.
+            goes. Clips play straight off disk, so nothing is loaded until the cue fires, and a
+            video cue does nothing while the screen window is closed.
           </p>
           <div class="field">
             <label>Name</label>
@@ -273,9 +274,14 @@
             </span>
             <span class="hint">
               Ends by itself: the clip leaves the screen when it finishes, firing its
-              <em>on end</em> triggers. That needs the screen window open — with it closed, a clip
-              never plays and never ends.
+              <em>on end</em> triggers.
             </span>
+            {#if !app.screenLive}
+              <span class="warn">
+                No screen window is open, so video cues do nothing at all — not even their triggers.
+                Open it from the toolbar.
+              </span>
+            {/if}
           {/if}
         {:else if cue.type === 'global'}
           {@const c = cue as GlobalCue}

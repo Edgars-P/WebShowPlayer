@@ -95,6 +95,14 @@
     return info.name;
   }
 
+  /** The one line the tile's tooltip shows, most blocking reason first. */
+  function title(): string {
+    if (info.missing) return 'Media missing';
+    if (info.unavailable) return info.unavailable;
+    if (info.pending) return 'Loading media…';
+    return stateTitle();
+  }
+
   function onClick(e: MouseEvent) {
     if (e.shiftKey) {
       // Shift-click: open properties.
@@ -139,7 +147,8 @@
   onmouseleave={() => {
     if (app.hoveredCueId === cue.id) app.hoveredCueId = null;
   }}
-  title={info.missing ? 'Media missing' : info.pending ? 'Loading media…' : stateTitle()}
+  class:unavailable={!!info.unavailable}
+  title={title()}
 >
 <button
   class="cue"
@@ -149,6 +158,7 @@
   class:selected={app.propertiesCueId === cue.id}
   class:missing={info.missing}
   class:pending={info.pending}
+  class:unavailable={!!info.unavailable}
   class:targeted={hints.length > 0}
   class:now={hintNow}
   class:hovering={isHovered}
@@ -329,6 +339,15 @@
      checking without learning anything from. */
   .cue.pending {
     filter: brightness(0.6) saturate(0.6);
+  }
+  /* Nothing wrong with the cue — it just has nowhere to run right now. Drained
+     of colour rather than dimmed, so it reads as "not available" instead of
+     "still loading", and the pointer says the click won't do anything. */
+  .cue.unavailable {
+    filter: brightness(0.55) saturate(0.15);
+  }
+  .hit.unavailable {
+    cursor: not-allowed;
   }
   .label {
     font-size: 13px;
