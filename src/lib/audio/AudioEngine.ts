@@ -288,11 +288,16 @@ export class AudioEngine {
     };
 
     if (fadeInSec > 0) {
-      pb.fadeInTimer = window.setTimeout(() => {
-        if (this.active.get(cue.id) === pb && pb.state === 'fadingIn') {
-          this.setState(pb, 'playing');
-        }
-      }, cue.fadeIn * 1000);
+      const landsAt = now + fadeInSec;
+      this.atAudioTime(
+        landsAt,
+        (id) => (pb.fadeInTimer = id),
+        () => {
+          if (this.active.get(cue.id) === pb && pb.state === 'fadingIn') {
+            this.setState(pb, 'playing');
+          }
+        },
+      );
     }
 
     // Fade onto the out point, if asked for — never starting before the
@@ -301,6 +306,39 @@ export class AudioEngine {
 
     this.onStateChange?.(cue.id, pb.state);
     this.onCueEvent?.(cue.id, 'onStart');
+  }
+
+  /**
+   * Run `fn` once the audio clock reaches `at`, keeping the pending timer's id
+   * wherever `hold` puts it so it can still be cancelled.
+   *
+   * Everything a fade does is scheduled on the audio clock, but a timeout runs
+   * on the wall clock, and on the first cue of a session those are not the same
+   * clock: the context is suspended until a gesture, and `resumeContext()` is
+   * deliberately not awaited, so the ramps go down against a `currentTime` that
+   * hasn't started moving yet. The wall clock has. A plain timeout for the
+   * fade's length then fires while the audible ramp still has that head start
+   * left to run — which showed up on the grid as a tile committing to full while
+   * its wedge was still a second from the end, on the first play and no other.
+   *
+   * So a timeout that lands early is re-armed for the difference rather than
+   * trusted, and the wait is measured off the audio clock each time round.
+   */
+  private atAudioTime(at: number, hold: (id: number) => void, fn: () => void): void {
+    const arm = () => {
+      const left = at - this.ctx.currentTime;
+      hold(
+        window.setTimeout(
+          () => {
+            // Behind still: the clock wasn't running for some of that wait.
+            if (this.ctx.currentTime < at) arm();
+            else fn();
+          },
+          Math.max(0, left * 1000),
+        ),
+      );
+    };
+    arm();
   }
 
   /**
@@ -327,7 +365,9 @@ export class AudioEngine {
     // The ramp above is on the audio clock; this only moves the tile into its
     // fading-out look at the same moment.
     if (pb.endFadeTimer !== null) clearTimeout(pb.endFadeTimer);
-    pb.endFadeTimer = window.setTimeout(
+    this.atAudioTime(
+      start,
+      (id) => (pb.endFadeTimer = id),
       () => {
         if (this.active.get(cue.id) !== pb || pb.stopping) return;
         // Only now does this become the fade in progress — setting it at
@@ -336,7 +376,6 @@ export class AudioEngine {
         pb.fadeUntil = pb.endsAt;
         this.setState(pb, 'fadingOut');
       },
-      Math.max(0, (start - this.ctx.currentTime) * 1000),
     );
   }
 
@@ -448,7 +487,11 @@ export class AudioEngine {
         /* already stopped */
       }
       this.setState(pb, 'fadingOut');
-      pb.stopTimer = window.setTimeout(() => this.finalize(pb, 'stopped'), cue.fadeOut * 1000);
+      this.atAudioTime(
+        pb.fadeUntil,
+        (id) => (pb.stopTimer = id),
+        () => this.finalize(pb, 'stopped'),
+      );
     } else {
       try {
         pb.source.stop(now);

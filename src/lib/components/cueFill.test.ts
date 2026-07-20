@@ -167,21 +167,36 @@ describe('fillFor', () => {
     expect(fillFor('idle', 1, CUT)).toEqual({ progress: 0, band: 0, direction: 'up' });
   });
 
-  it('sweeps a rising wedge as a fade-in progresses', () => {
-    expect(fillFor('fadingIn', 0, LONG)).toEqual({ progress: 0, band: 0, direction: 'up' });
-    expect(fillFor('fadingIn', 0.5, LONG)).toEqual({ progress: 0.5, band: 0, direction: 'up' });
-    expect(fillFor('fadingIn', 1, LONG)).toEqual({ progress: 1, band: 0, direction: 'up' });
-  });
+  describe('a fade-in', () => {
+    /** How far through a `seconds`-long fade `at` seconds is. */
+    const after = (at: number, seconds: number) => at / seconds;
 
-  it('hands a finished fade-in to the live state with only the band moving', () => {
-    // The instant a fade-in completes, the cue flips to `playing` and the band
-    // rises. Nothing else may change in that frame: a wedge that also slid or
-    // flipped would read as a second thing happening.
-    const done = fillFor('fadingIn', 1, LONG);
-    const live = fillFor('playing', 0, LONG);
-    expect(live.progress).toBe(done.progress);
-    expect(live.direction).toBe(done.direction);
-    expect(live.band).toBeGreaterThan(done.band);
+    it('sweeps a rising wedge as it progresses', () => {
+      expect(fillFor('fadingIn', 0, LONG)).toEqual({ progress: 0, band: 0, direction: 'up' });
+      // Half of the pre-commit span laid down, half the wedge.
+      const half = (LONG - COMMIT_TIME) / 2;
+      expect(fillFor('fadingIn', after(half, LONG), LONG).progress).toBeCloseTo(0.5, 6);
+    });
+
+    it('fills the wedge a commit early, so the band lands with the audio', () => {
+      // The band takes COMMIT_TIME to rise and only starts once the wedge is
+      // full; starting it at the end of the fade would finish it 100ms late.
+      const commitStarts = after(LONG - COMMIT_TIME, LONG);
+      expect(fillFor('fadingIn', commitStarts, LONG)).toEqual({
+        progress: 1,
+        band: 1,
+        direction: 'up',
+      });
+      // Not a moment before that, though — the band is the last thing to move.
+      expect(fillFor('fadingIn', after(LONG - COMMIT_TIME * 1.5, LONG), LONG).band).toBe(0);
+    });
+
+    it('hands over to the live state without anything moving at all', () => {
+      // The cue flips to `playing` when the fade lands, by which point the tile
+      // is already solid: the commit ran during the fade's last 100ms. A shape
+      // that changed on that frame would be a second thing happening.
+      expect(fillFor('fadingIn', 1, LONG)).toEqual(fillFor('playing', 1, LONG));
+    });
   });
 
   it('lands a finished fade-out on the same shape as idle', () => {

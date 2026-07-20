@@ -3,8 +3,11 @@
   import { formatTime } from '../timer/timer';
   import type { Cue } from '../types';
   import CueHints from './CueHints.svelte';
+  import { cubicOut } from 'svelte/easing';
+  import { Tween } from 'svelte/motion';
   import {
     bandPath,
+    COMMIT_TIME,
     fillFor,
     sweepPath,
     wedgePath,
@@ -38,6 +41,30 @@
   let fill = $derived(
     fillFor(info.state, audioTarget ? app.fadeProgress(audioTarget) : 1, fadeSeconds),
   );
+
+  /**
+   * The commit, tweened here rather than by a CSS transition on the clip-path.
+   *
+   * Its length is not a look, it is a term in the fill maths: the fade-out holds
+   * its wedge full for exactly this long, and the fade-in fills its wedge
+   * exactly this early, both so the two shapes hand over cleanly. A duration
+   * sitting in a stylesheet is one nobody can see from there, and the two drifted
+   * apart the moment either was tuned. Tweening from the same constant leaves
+   * one definition.
+   *
+   * Started at whatever the cue is already doing, so a tile that mounts on a
+   * playing cue — switching tabs, opening a second file — is solid immediately
+   * rather than committing to something that started without it.
+   */
+  // svelte-ignore state_referenced_locally -- the initial value is the point:
+  // where the tween starts, not something it should follow.
+  const band = new Tween(fillFor(info.state, 1, 0).band, {
+    duration: COMMIT_TIME * 1000,
+    easing: cubicOut,
+  });
+  $effect(() => {
+    band.target = fill.band;
+  });
 
   /**
    * Whether a wedge is being drawn at all: a fade the tile is showing as one.
@@ -311,6 +338,7 @@
     class:hovering={isHovered}
     style:--cue-color={info.color}
     style:--glow={glow}
+    style:--commit="{COMMIT_TIME}s"
   >
     <span class="layer rest">{@render face()}</span>
 
@@ -335,7 +363,7 @@
     </span>
 
     <!-- Live: the whole card. Rises over the wedge and falls back through it. -->
-    <span class="band" style:clip-path={bandPath(fill.band)}>
+    <span class="band" style:clip-path={bandPath(band.current)}>
       <span class="layer filled">{@render face()}</span>
     </span>
 
@@ -467,14 +495,11 @@
     inset: 0;
     pointer-events: none;
   }
-  /* The band is the only shape that animates: it rises when the cue goes live
-     and falls when it starts on its way out. The sweep across the wedge is
-     redrawn every frame off the audio clock, so a transition there would only
-     add lag to a value that is already smooth — and it never jumps, because a
-     playing cue keeps its wedge fully swept underneath the band. */
-  .band {
-    transition: clip-path 0.1s ease-out;
-  }
+  /* The band's own rise and fall is tweened in the script, not here — see the
+     `band` Tween. The sweep across the wedge takes no transition at all: it is
+     redrawn every frame off the audio clock, so easing it would only add lag to
+     a value that is already smooth, and it never jumps, because a playing cue
+     keeps its wedge fully swept underneath the band. */
   /* Neither wedge is drawn except while a fade is being drawn as one. The two
      appear and leave at different moments, though, which is why this is a pair
      of asymmetric transitions rather than one fade either way:
@@ -490,7 +515,7 @@
      track, not the fill, and it is never fully opaque. */
   .wedge {
     opacity: 0;
-    transition: opacity 0.1s ease-out;
+    transition: opacity var(--commit) ease-out;
   }
   .wedge.showing {
     opacity: 1;
@@ -503,11 +528,11 @@
   .ghost {
     background: var(--fill);
     opacity: 0;
-    transition: opacity 0.1s ease-out;
+    transition: opacity var(--commit) ease-out;
   }
   .ghost.showing {
     opacity: 0.22;
-    transition: opacity 0.1s ease-out;
+    transition: opacity var(--commit) ease-out;
   }
 
   .title {

@@ -175,6 +175,13 @@ export class Doc {
 
     this.engine.onStateChange = (id, state) => {
       this.playStates[id] = state;
+      // A state change is a change to every readout taken off the engine, and
+      // they are all gated behind `tick` — which the rAF loop wouldn't move
+      // until the next frame. That frame is long enough to be seen: a tile that
+      // pairs a fresh `fadingIn` with the fade length of a moment ago, which is
+      // zero, reads it as a cut and starts committing to a full card before the
+      // real one arrives and sends it back.
+      this.tick += 1;
       if (state !== 'idle') this.ensureRaf();
     };
     this.engine.onCueEvent = (id, event) => {

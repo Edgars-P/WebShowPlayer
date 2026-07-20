@@ -105,6 +105,23 @@ export function allSourceNodes(): StubNode[] {
 }
 
 /**
+ * The audio clock, in seconds. Frozen by default and moved only by a test that
+ * asks for it: the real one runs at its own pace and is not the wall clock, so
+ * a test that wants to know what happens between them has to hold both.
+ */
+let audioNow = 0;
+
+/** Move the audio clock on, the way a running context would. */
+export function advanceAudioClock(seconds: number): void {
+  audioNow += seconds;
+}
+
+/** Put the audio clock back to zero, i.e. a context that has yet to start. */
+export function resetAudioClock(): void {
+  audioNow = 0;
+}
+
+/**
  * Install stub globals. Returns counters the test can assert on, plus a
  * teardown. Call before importing any module that touches the AudioContext.
  */
@@ -115,7 +132,9 @@ export function installAudioStubs(): StubCounters & { restore: () => void } {
 
   g.AudioContext = class {
     state = 'running';
-    currentTime = 0;
+    get currentTime() {
+      return audioNow;
+    }
     destination = new StubNode();
     async decodeAudioData() {
       counters.decodes++;

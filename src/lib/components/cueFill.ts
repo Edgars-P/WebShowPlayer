@@ -31,8 +31,13 @@ import type { PlaybackState } from '../types';
 export const WEDGE_HEIGHT = 0.42;
 
 /**
- * How long the band takes to rise or fall, in seconds. Kept in step with the
- * `clip-path` transition on `.band` in CueButton by hand — CSS can't read it.
+ * How long the band takes to rise or fall, in seconds.
+ *
+ * Not a decoration: the fades below are built around it, holding or filling
+ * their wedge by exactly this much so the two shapes hand over cleanly. Which
+ * is why the tile tweens the band from this constant rather than transitioning
+ * it in CSS, and hands it to the stylesheet as `--commit` for the couple of
+ * opacities that follow the same beat. One definition, and it is this one.
  */
 export const COMMIT_TIME = 0.1;
 
@@ -141,6 +146,25 @@ export function wedgeWorthDrawing(fadeSeconds: number): boolean {
 }
 
 /**
+ * How much of the wedge a fade-in has laid down, 0..1.
+ *
+ * Full a commit's length *before* the fade lands, which is what lets the band
+ * start rising there and finish on time. Sweeping right up to the end instead
+ * put the whole commit after the audio was already at level, so the tile
+ * announced a cue that had finished arriving.
+ *
+ * The wedge therefore runs slightly ahead of the audible level, exactly as it
+ * runs behind on the way out. Both are the same trade, and it is the right way
+ * round: what the wedge is for is telling an operator where the level is
+ * *heading*, so it belongs at the end it is heading toward.
+ */
+function swept(fade: number, fadeSeconds: number): number {
+  const span = fadeSeconds - COMMIT_TIME;
+  if (span <= 0) return 1;
+  return clamp((clamp(fade) * fadeSeconds) / span);
+}
+
+/**
  * How much of the wedge a fade-out has taken away, 0..1.
  *
  * The drain doesn't start with the fade: the band has to get out of the way
@@ -199,8 +223,14 @@ export function fillFor(state: PlaybackState, fade: number, fadeSeconds: number)
   switch (shown) {
     case 'playing':
       return { progress: 1, band: 1, direction: 'up' };
-    case 'fadingIn':
-      return { progress: clamp(fade), band: 0, direction: 'up' };
+    case 'fadingIn': {
+      // A full wedge is the cue's signal to commit: the band goes up the moment
+      // the sweep lands, a commit's length before the fade does, so the two
+      // finish together. Holding it at 0 until the engine flips the state would
+      // be the same 100ms of animation starting 100ms too late.
+      const laid = swept(fade, fadeSeconds);
+      return { progress: laid, band: laid >= 1 ? 1 : 0, direction: 'up' };
+    }
     case 'fadingOut':
       return { progress: 1 - drained(fade, fadeSeconds), band: 0, direction: 'down' };
     default:
