@@ -1,5 +1,6 @@
 <script lang="ts">
   import { app } from '../state/project.svelte';
+  import { cueDrag } from './cueDrag.svelte';
   import { formatTime } from '../timer/timer';
   import type { Cue } from '../types';
   import CueHints from './CueHints.svelte';
@@ -276,10 +277,10 @@
     app.activate(cue);
   }
 
-  function onDragStart(e: DragEvent) {
-    if (!e.dataTransfer) return;
-    e.dataTransfer.setData('text/cue-id', cue.id);
-    e.dataTransfer.effectAllowed = 'copyMove';
+  // Alt picks the tile up to move it, Ctrl to copy it. Everything about the
+  // gesture lives in cueDrag; the tile only offers it the press.
+  function onPointerDown(e: PointerEvent) {
+    cueDrag.press(cue.id, e);
   }
 
 </script>
@@ -304,19 +305,17 @@
 
 <!--
   The wrapper fills the whole grid cell, including the space that reads as the
-  gap between tiles, and carries hover and click — Fitts's law: the gap is dead
-  pixels the pointer has to cross, so every one belongs to the nearest cue.
-
-  Dragging stays on the inner button, i.e. the visible tile only. Making the
-  wrapper the drag source broke Shift-drag: the browser resolves a modified
-  mousedown on a non-draggable wrapper as a selection gesture and swallows the
-  press. The tile is a big enough drag handle, and clicks on it bubble to the
-  wrapper, so there's one click path either way.
+  gap between tiles, and carries hover, click and the drag — Fitts's law: the
+  gap is dead pixels the pointer has to cross, so every one belongs to the
+  nearest cue. The drag can sit out here now that it's a pointer gesture; under
+  native DnD it had to stay on the visible tile, because a modified press on a
+  non-draggable wrapper is a selection gesture the browser swallows.
 -->
 <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
 <div
   class="hit"
   onclick={onClick}
+  onpointerdown={onPointerDown}
   onmouseenter={() => (app.hoveredCueId = cue.id)}
   onmouseleave={() => {
     if (app.hoveredCueId === cue.id) app.hoveredCueId = null;
@@ -326,8 +325,7 @@
 >
   <button
     class="cue"
-    draggable={app.dragModifier}
-    ondragstart={onDragStart}
+    class:lifted={cueDrag.id === cue.id}
     class:active
     class:selected={app.propertiesCueId === cue.id}
     class:missing={info.missing}
@@ -578,6 +576,11 @@
     box-shadow:
       inset 0 0 0 1px rgba(255, 255, 255, 0.28),
       0 0 calc(6px + var(--glow, 0) * 34px) var(--halo);
+  }
+  /* The tile is being carried: the copy under the pointer is the live one, and
+     this is the hole it came out of. */
+  .cue.lifted {
+    opacity: 0.35;
   }
   .cue.selected {
     outline: 2px solid #fff;

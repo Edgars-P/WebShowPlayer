@@ -55,7 +55,7 @@ export class AppState implements ScreenHost {
 
   /** Tile the pointer is over, driving the trigger-chain preview. */
   hoveredCueId = $state<string | null>(null);
-  /** Whether a drag-enabling modifier (Shift or Ctrl) is currently held. */
+  /** Whether a pick-up modifier (Shift, Alt or Ctrl) is held, for the cursor. */
   dragModifier = $state(false);
 
   /**
