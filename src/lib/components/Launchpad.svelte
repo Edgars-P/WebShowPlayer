@@ -93,6 +93,7 @@
     ondragleave={() => (hoverKey = null)}
     onmouseleave={() => (app.hoveredCueId = null)}
     onmousemove={syncModifiers}
+    role="presentation"
   >
     {#each cells(project.grid.rows, project.grid.cols) as cell (cell.row + '-' + cell.col)}
       {@const cue = app.cueAt(tab, cell.row, cell.col)}
@@ -102,6 +103,7 @@
         ondragover={(e) => onDragOver(e, cell.row, cell.col)}
         ondrop={(e) => onDrop(e, cell.row, cell.col)}
         oncontextmenu={(e) => onContext(e, cell.row, cell.col)}
+        role="presentation"
       >
         {#if cue}
           {#key cue.id}

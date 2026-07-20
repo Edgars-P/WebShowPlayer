@@ -87,8 +87,10 @@ export interface ScreenHost {
   pauseTimer(): void;
   resumeTimer(): void;
   clearTimer(): void;
-  /** Register what to run when the countdown reaches zero on its own. */
-  claimTimer(onFinished: () => void): void;
+  /** Take the countdown over: whose chain runs at zero, and whose tile shows it. */
+  claimTimer(cueId: string | null, onFinished: () => void): void;
+  /** Whether the given cue is the one holding the countdown right now. */
+  ownsTimer(cueId: string): boolean;
   setVideo(req: VideoRequest): void;
   pauseVideo(): void;
   resumeVideo(): void;
@@ -370,7 +372,20 @@ export class Doc {
           : 'No screen to play on — open the screen window from the toolbar.',
       };
     }
-    if (cue.type === 'http' || cue.type === 'timer' || cue.type === 'global') {
+    if (cue.type === 'timer') {
+      // Lit while this cue's countdown is the one on the clock — the same
+      // "holds the shared slot" rule video runs on. A `set` cue is the only
+      // kind that can hold it; pause/resume/clear act on whatever is there and
+      // stay dark, because none of them owns the time being counted.
+      return {
+        name: cue.name,
+        color: cue.color,
+        state: this.host.ownsTimer(cue.id) ? 'playing' : 'idle',
+        missing: false,
+        pending: false,
+      };
+    }
+    if (cue.type === 'http' || cue.type === 'global') {
       return { name: cue.name, color: cue.color, state: 'idle', missing: false, pending: false };
     }
     const status = this.audioStatus[cue.id] ?? 'missing';
@@ -513,7 +528,9 @@ export class Doc {
     switch (action) {
       case 'set':
         // Claim the shared timer so *this* document's cue chains off its end.
-        this.host.claimTimer(() => this.propagate(() => this.fireTriggers(cue.id, 'onStop')));
+        this.host.claimTimer(cue.id, () =>
+          this.propagate(() => this.fireTriggers(cue.id, 'onStop')),
+        );
         this.host.setTimer(cue.duration);
         break;
       case 'pause':
@@ -728,10 +745,40 @@ export class Doc {
     return Math.min(1, (this.engine.getPosition(cue) - cue.startTime) / dur);
   }
 
+  /** Seconds of a cue still to play, respecting its trim. */
+  remaining(cue: AudioCue): number {
+    void this.tick; // reactive dependency
+    const dur = this.engine.getDuration(cue);
+    if (dur <= 0) return 0;
+    return Math.max(0, dur - (this.engine.getPosition(cue) - cue.startTime));
+  }
+
+  /** Effective (trimmed) length of a cue's clip in seconds; 0 if not loaded. */
+  duration(cue: AudioCue): number {
+    void this.tick; // reactive dependency
+    return this.engine.getDuration(cue);
+  }
+
+  /** Jump a cue to a fraction (0..1) of its trimmed length. */
+  seekTo(cue: AudioCue, fraction: number): void {
+    const dur = this.engine.getDuration(cue);
+    if (dur <= 0) return;
+    this.engine.seek(cue, cue.startTime + Math.min(1, Math.max(0, fraction)) * dur);
+    // Scrubbing a *stopped* cue moves its resume point with no rAF loop running
+    // to notice; bump the clock by hand so the bar follows the pointer.
+    this.tick += 1;
+  }
+
   /** How far through its current fade a cue is (0..1); 1 when not fading. */
   fadeProgress(cue: AudioCue): number {
     void this.tick; // reactive dependency
     return this.engine.getFadeProgress(cue.id);
+  }
+
+  /** How long that fade was asked to take, in seconds; 0 when not fading. */
+  fadeSeconds(cue: AudioCue): number {
+    void this.tick; // reactive dependency
+    return this.engine.getFadeSeconds(cue.id);
   }
 
   /** Live loudness of a playing audio cue (0..1), for reactive glow. */

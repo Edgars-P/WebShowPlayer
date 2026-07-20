@@ -1,11 +1,16 @@
 <script lang="ts">
-  import { fade } from 'svelte/transition';
   import { app } from '../state/project.svelte';
   import { formatTime } from '../timer/timer';
   import type { Cue } from '../types';
-
-  /** Matches the tile's own highlight transition, so ring and badges move together. */
-  const HINT_FADE_MS = 120;
+  import CueHints from './CueHints.svelte';
+  import {
+    bandPath,
+    fillFor,
+    sweepPath,
+    wedgePath,
+    wedgeWorthDrawing,
+    type Direction,
+  } from './cueFill';
 
   let { cue }: { cue: Cue } = $props();
 
@@ -13,26 +18,146 @@
   let flash = $derived(app.httpFlashes[cue.id]);
   let active = $derived(info.state !== 'idle');
   // Resolve to the real cue (self, or a proxy's source) to read its live state.
-  let audioTarget = $derived(active ? app.resolveProxy(cue) : null);
+  let target = $derived(app.resolveProxy(cue));
+  let audioTarget = $derived(target?.type === 'audio' ? target : null);
+  let videoTarget = $derived(target?.type === 'video' ? target : null);
+  let timerTarget = $derived(target?.type === 'timer' ? target : null);
+
   /**
-   * Audio glows with its own output loudness. Video can't: the element is on the
-   * other screen, and measuring it would mean routing that window's sound
-   * through an AudioContext just to light a tile over here. It gets a steady
-   * glow instead — enough to read as live across the room, with the progress bar
-   * carrying the detail.
+   * How long the fade in progress has in it, from the playback rather than the
+   * cue — an end-of-clip fade is cut to the audio that's left. Only audio fades
+   * at all; everything else cuts.
    */
-  const VIDEO_GLOW = 0.4;
-  let glow = $derived(
-    audioTarget?.type === 'audio'
-      ? app.level(audioTarget)
-      : audioTarget?.type === 'video'
-        ? // A held clip is still up, but it isn't going anywhere; it gets the
-          // ring without the pull of a full glow.
-          app.videoStatus.playing
-          ? VIDEO_GLOW
-          : VIDEO_GLOW / 3
-        : 0,
+  let fadeSeconds = $derived(audioTarget ? app.fadeSeconds(audioTarget) : 0);
+
+  /**
+   * How much of the tile is coloured in, and along what slope. This is the whole
+   * state readout: empty is idle, solid is playing, and a wedge filling along
+   * the foot is a fade with its slope pointing the way it's going.
+   */
+  let fill = $derived(
+    fillFor(info.state, audioTarget ? app.fadeProgress(audioTarget) : 1, fadeSeconds),
   );
+
+  /**
+   * Whether a wedge is being drawn at all: a fade the tile is showing as one.
+   * A cut isn't, and neither is a fade shorter than the commit animation — both
+   * of those are the band on its own. The state test is not redundant with the
+   * time: a cue that has *finished* a long fade-in still reports that fade's
+   * length, and it is not fading any more.
+   */
+  let fading = $derived(
+    (info.state === 'fadingIn' || info.state === 'fadingOut') && wedgeWorthDrawing(fadeSeconds),
+  );
+
+  /**
+   * Which way the wedge leans — the last fade's lean, held through the states
+   * either side of it.
+   *
+   * A fade-out ends by handing over to idle, and the ghost wedge is still on
+   * screen at that moment: it has its own 100ms to fade away. Taking the
+   * direction straight from the current state flipped the wedge under it as it
+   * went, so the last thing a stopping cue did was appear to reverse. Holding
+   * the lean means the flip only ever happens while the wedge is invisible —
+   * under a full band on the way into a fade-out, at zero opacity on the way
+   * into a fade-in.
+   */
+  let lastFadeDirection = $state<Direction>('up');
+  $effect(() => {
+    if (fading) lastFadeDirection = fill.direction;
+  });
+  // Read live while fading, so a fade never waits a frame for its own slope.
+  let direction = $derived(fading ? fill.direction : lastFadeDirection);
+
+  /**
+   * Audio glows with its own output loudness. Nothing else can: a clip plays on
+   * the other screen — measuring it would mean routing that window's sound
+   * through an AudioContext just to light a tile over here — and a countdown
+   * has no output to measure at all. Both get a steady glow instead: enough to
+   * read as live across the room, with the scrub bar carrying the detail.
+   *
+   * Held is the one distinction worth drawing. A paused clip or a paused clock
+   * is still up in front of the audience but isn't going anywhere, so it gets
+   * the ring without the pull of a full glow.
+   */
+  const STEADY_GLOW = 0.4;
+  let glow = $derived(
+    !active
+      ? 0
+      : audioTarget
+        ? app.level(audioTarget)
+        : videoTarget
+          ? app.videoStatus.playing
+            ? STEADY_GLOW
+            : STEADY_GLOW / 3
+          : timerTarget
+            ? app.timer.running
+              ? STEADY_GLOW
+              : STEADY_GLOW / 3
+            : 0,
+  );
+
+  // ---- Scrubbing ---------------------------------------------------------
+
+  /** Length of whatever this tile is playing, in seconds; 0 if not scrubbable. */
+  let length = $derived(
+    !active
+      ? 0
+      : audioTarget
+        ? app.duration(audioTarget)
+        : videoTarget
+          ? app.videoStatus.duration
+          : timerTarget
+            ? app.timer.duration
+            : 0,
+  );
+  /**
+   * Playhead position, 0..1. The countdown moves in 200ms steps rather than per
+   * frame, which is the rate it is counted at — and at the lengths a show timer
+   * is set for, a bar that advanced smoothly would be advancing invisibly.
+   */
+  let played = $derived(
+    length <= 0
+      ? 0
+      : audioTarget
+        ? app.progress(audioTarget)
+        : videoTarget
+          ? app.videoProgressFraction
+          : app.timerProgressFraction,
+  );
+  let seekable = $derived(length > 0);
+  let scrubbing = $state(false);
+
+  function seekTo(e: PointerEvent): void {
+    const rail = e.currentTarget as HTMLElement;
+    const box = rail.getBoundingClientRect();
+    if (box.width <= 0) return;
+    const f = (e.clientX - box.left) / box.width;
+    if (audioTarget) app.seekTo(audioTarget, f);
+    else if (videoTarget) app.seekVideo(f);
+    else if (timerTarget) app.seekTimer(f);
+  }
+
+  function scrubStart(e: PointerEvent): void {
+    // The tile underneath is a transport button and a drag source; neither
+    // should hear about a press that lands on the scrub bar.
+    e.stopPropagation();
+    e.preventDefault();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    scrubbing = true;
+    seekTo(e);
+  }
+
+  function scrubMove(e: PointerEvent): void {
+    if (scrubbing) seekTo(e);
+  }
+
+  function scrubEnd(e: PointerEvent): void {
+    e.stopPropagation();
+    scrubbing = false;
+  }
+
+  // ---- Trigger hints -----------------------------------------------------
 
   // What the hovered tile's triggers would do to this one — empty unless some
   // other tile is hovered and drives this one.
@@ -41,39 +166,14 @@
   let hintNow = $derived(hints.some((h) => h.now));
   let isHovered = $derived(app.hoveredCueId === cue.id);
 
-  // Filled glyphs = a definite transport action; hollow = a softer variant, so
-  // start/resume and stop/pause stay distinguishable at 9px.
-  const EVENT_GLYPH = {
-    onStart: '▶',
-    onPause: '⏸',
-    onStop: '⏹',
-    onEnd: '⇥',
-  } as const;
-  const ACTION_GLYPH = {
-    click: '⊙',
-    start: '▶',
-    resume: '▷',
-    pause: '⏸',
-    stop: '⏹',
-    set: '⏱',
-    clear: '⊘',
-  } as const;
-  const EVENT_WORD = {
-    onStart: 'when it starts',
-    onPause: 'when it pauses',
-    onStop: 'when it stops',
-    onEnd: 'when it ends',
-  } as const;
-
-  function hintTitle(h: (typeof hints)[number]): string {
-    return `${EVENT_WORD[h.event]}, ${h.action} this cue${h.now ? ' — this click' : ''}`;
-  }
+  // ---- Labels ------------------------------------------------------------
 
   /** What a tile says when the cue has no name of its own. */
   const DEFAULT_LABELS: Partial<Record<Cue['type'], string>> = {
     http: 'HTTP',
     timer: 'Timer',
     video: 'Video',
+    global: 'All',
   };
 
   /** Bare file name of a clip, without its folder path or extension. */
@@ -82,12 +182,49 @@
     return file.split('/').pop()!.replace(/\.[^.]+$/, '');
   }
 
-  const STATE_LABELS = {
-    fadingIn: 'fading in',
-    playing: 'playing',
-    fadingOut: 'fading out',
-    idle: '',
-  } as const;
+  /** Host of an HTTP cue's URL, or the raw string if it won't parse. */
+  function host(url: string): string {
+    if (!url) return '(no url)';
+    try {
+      return new URL(url).host;
+    } catch {
+      return url;
+    }
+  }
+
+  /**
+   * The tile's second line: what kind of cue this is at rest, and how much of it
+   * is left once it's running.
+   *
+   * A live cue trades its description for its remaining time on purpose. The
+   * fill already says *that* it's playing — repeating the word there would be
+   * the one thing on a running tile carrying no information — while the number
+   * an operator is actually waiting on has nowhere else to live.
+   */
+  function subtitle(): string {
+    if (info.missing) return 'media missing';
+    if (info.pending) return 'loading…';
+    if (info.unavailable) return 'no screen';
+    if (active && length > 0) return `−${formatTime(Math.max(0, length * (1 - played)))}`;
+
+    switch (cue.type) {
+      case 'audio': {
+        const secs = app.duration(cue);
+        return secs > 0 ? formatTime(secs) : 'audio';
+      }
+      case 'proxy':
+        return `⇄ ${target && target.type !== 'proxy' ? app.display(target).name || 'audio' : 'nothing'}`;
+      case 'timer':
+        return `⏱ ${cue.action === 'set' ? formatTime(cue.duration) : cue.action}`;
+      case 'video':
+        return cue.action === 'play' ? `▶ ${clipName(cue.file)}` : `▶ ${cue.action}`;
+      case 'global':
+        // Scope first: reaching into other cue files is the surprising part.
+        return `${cue.scope === 'all' ? '◎ every file' : '◉'} ${cue.action}${cue.fade ? '' : ' · cut'}`;
+      case 'http':
+        return `${cue.method} ${host(cue.url)}`;
+    }
+  }
 
   function stateTitle(): string {
     if (info.state === 'fadingIn') return `${info.name} — click to bring it up to full now`;
@@ -118,15 +255,25 @@
     e.dataTransfer.effectAllowed = 'copyMove';
   }
 
-  function fg(bg: string): string {
-    // Pick readable text colour for the tile background.
-    const m = /^#?([0-9a-f]{6})$/i.exec(bg);
-    if (!m) return '#fff';
-    const n = parseInt(m[1], 16);
-    const lum = (0.299 * (n >> 16)) + (0.587 * ((n >> 8) & 255)) + (0.114 * (n & 255));
-    return lum > 150 ? '#0e0f13' : '#fff';
-  }
 </script>
+
+<!--
+  The tile's text is rendered twice: once on the resting card, once inside the
+  fill, clipped to exactly the same wedge. The two are pixel-aligned, so as the
+  colour sweeps across, every glyph it passes flips to its readable-on-colour
+  version at the moment the edge crosses it — no fading text, and no compromise
+  colour that has to survive both grounds.
+-->
+{#snippet face()}
+  <!-- A proxy borrows its source's name, colour and state, so once it's running
+       there is nothing left to tell the two tiles apart — and they are not the
+       same: clicking this one stops a cue somewhere else. The mark is the only
+       thing on the tile that stays put in every state, because that difference
+       doesn't go away when the cue starts. -->
+  {#if cue.type === 'proxy'}<span class="mark" aria-hidden="true">⇄</span>{/if}
+  <span class="title">{info.name || DEFAULT_LABELS[cue.type] || '—'}</span>
+  <span class="sub">{subtitle()}</span>
+{/snippet}
 
 <!--
   The wrapper fills the whole grid cell, including the space that reads as the
@@ -150,119 +297,75 @@
   class:unavailable={!!info.unavailable}
   title={title()}
 >
-<button
-  class="cue"
-  draggable={app.dragModifier}
-  ondragstart={onDragStart}
-  class:active
-  class:selected={app.propertiesCueId === cue.id}
-  class:missing={info.missing}
-  class:pending={info.pending}
-  class:unavailable={!!info.unavailable}
-  class:targeted={hints.length > 0}
-  class:now={hintNow}
-  class:hovering={isHovered}
-  style:--cue-bg={info.missing ? '#3a2020' : info.color}
-  style:--cue-fg={fg(info.missing ? '#3a2020' : info.color)}
-  style:--glow={glow}
->
-  <span class="badges">
-    {#if cue.type === 'proxy'}<span class="badge">⇄</span>{/if}
-    {#if cue.type === 'http'}<span class="badge">HTTP</span>{/if}
-    {#if cue.type === 'timer'}<span class="badge">⏱ {cue.action}</span>{/if}
-    {#if cue.type === 'video'}<span class="badge">▶ video</span>{/if}
-    {#if cue.type === 'global'}
-      <span class="badge" title={cue.scope === 'all' ? 'Every open cue file' : 'This cue file'}>
-        {cue.scope === 'all' ? '◎' : '◉'} all{cue.fade ? '' : ' ⚡'}
+  <button
+    class="cue"
+    draggable={app.dragModifier}
+    ondragstart={onDragStart}
+    class:active
+    class:selected={app.propertiesCueId === cue.id}
+    class:missing={info.missing}
+    class:pending={info.pending}
+    class:unavailable={!!info.unavailable}
+    class:targeted={hints.length > 0}
+    class:now={hintNow}
+    class:hovering={isHovered}
+    style:--cue-color={info.color}
+    style:--glow={glow}
+  >
+    <span class="layer rest">{@render face()}</span>
+
+    <!-- The track the fade fills along: the wedge it is heading for, drawn
+         empty. Without it the sweep is a shape that grows, and a shape that
+         grows carries no sense of how much is left. Always present so it can
+         fade in and out with the fade itself rather than popping. -->
+    <span class="wedge ghost" class:showing={fading} style:clip-path={wedgePath(direction)}></span>
+
+    <!-- The swept part of the wedge. Two nested clips, which intersect: the
+         wedge's own outline, and how far along it the fade has got.
+
+         Shown only while a fade is being drawn, for the same reason as the
+         track behind it. A playing cue keeps its wedge fully swept underneath
+         the band, so a fade-out has a full one to collapse onto — but with the
+         band mid-rise it isn't fully underneath anything, and left visible it
+         put a triangle on screen for the 100ms of every cut. -->
+    <span class="wedge" class:showing={fading} style:clip-path={wedgePath(direction)}>
+      <span class="sweep" style:clip-path={sweepPath(fill.progress, direction)}>
+        <span class="layer filled">{@render face()}</span>
+      </span>
+    </span>
+
+    <!-- Live: the whole card. Rises over the wedge and falls back through it. -->
+    <span class="band" style:clip-path={bandPath(fill.band)}>
+      <span class="layer filled">{@render face()}</span>
+    </span>
+
+    {#if seekable}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <span
+        class="scrub"
+        class:scrubbing
+        style:--played={played}
+        onpointerdown={scrubStart}
+        onpointermove={scrubMove}
+        onpointerup={scrubEnd}
+        onpointercancel={scrubEnd}
+        onclick={(e) => e.stopPropagation()}
+        ondragstart={(e) => e.preventDefault()}
+        title="Drag to scrub"
+      >
+        <span class="rail"><span class="elapsed"></span></span>
+        <span class="knob"></span>
       </span>
     {/if}
-  </span>
 
-  <span class="label"
-    >{info.name || DEFAULT_LABELS[cue.type] || '—'}</span
-  >
+    <CueHints {hints} />
 
-  {#if cue.type === 'timer'}
-    <span class="state">{cue.action === 'set' ? formatTime(cue.duration) : cue.action}</span>
-  {/if}
-
-  {#if cue.type === 'video'}
-    <span class="state">
-      {#if active}
-        <!-- On air. Same chip as a playing audio cue, so the two read alike
-             across the grid, with the clip's remaining time in place of a fade
-             bar — that's the number an operator is waiting on. -->
-        <span class="chip" class:chip-fadingOut={!app.videoStatus.playing}>
-          <span class="row">
-            <span class="glyph" aria-hidden="true">{app.videoStatus.playing ? '▶' : '⏸'}</span>
-            {app.videoStatus.playing ? 'on screen' : 'held'}
-          </span>
-          {#if app.videoStatus.duration > 0}
-            <span class="row">−{formatTime(app.videoStatus.duration - app.videoStatus.position)}</span>
-          {/if}
-        </span>
-      {:else}
-        <!-- The file name is what tells two otherwise identical unnamed clips
-             apart, so it stands in when the cue plays one. -->
-        {cue.action === 'play' ? clipName(cue.file) : cue.action}
-      {/if}
-    </span>
-    {#if active}
-      <span class="progress" style:width={`${app.videoProgressFraction * 100}%`}></span>
+    {#if flash}
+      {#key flash.at}
+        <span class="flash flash-{flash.state}"></span>
+      {/key}
     {/if}
-  {/if}
-
-  {#if cue.type === 'global'}
-    <span class="state">{cue.action} all{cue.fade ? '' : ' · instant'}</span>
-  {/if}
-
-  {#if cue.type === 'audio' || cue.type === 'proxy'}
-    <span class="state">
-      {#if active}
-        <span class="chip chip-{info.state}">
-          <span class="row">
-            <span class="glyph" aria-hidden="true">
-              {info.state === 'playing' ? '▶' : info.state === 'fadingIn' ? '▲' : '▼'}
-            </span>
-            {STATE_LABELS[info.state]}
-          </span>
-          {#if info.state !== 'playing' && audioTarget?.type === 'audio'}
-            <!-- The one moving thing here, and it's carrying information: how
-                 much of the fade is left. -->
-            <span class="fadebar">
-              <span class="fill" style:width={`${app.fadeProgress(audioTarget) * 100}%`}></span>
-            </span>
-          {/if}
-        </span>
-      {:else if info.pending}
-        <span class="chip chip-loading"><span class="row">loading</span></span>
-      {/if}
-    </span>
-    {#if active}
-      {@const target = app.resolveProxy(cue)}
-      {#if target && target.type === 'audio'}
-        <span class="progress" style:width={`${app.progress(target) * 100}%`}></span>
-      {/if}
-    {/if}
-  {/if}
-
-  {#if hints.length}
-    <span class="hints" transition:fade={{ duration: HINT_FADE_MS }}>
-      {#each hints as h, i (i)}
-        <span class="hint" class:now={h.now} title={hintTitle(h)}>
-          <span class="box when">{EVENT_GLYPH[h.event]}</span>
-          <span class="box what">{ACTION_GLYPH[h.action]}</span>
-        </span>
-      {/each}
-    </span>
-  {/if}
-
-  {#if flash}
-    {#key flash.at}
-      <span class="flash flash-{flash.state}"></span>
-    {/key}
-  {/if}
-</button>
+  </button>
 </div>
 
 <style>
@@ -283,47 +386,173 @@
     -webkit-user-select: none;
   }
 
+  /* The resting card. Its own colour is present but held right back — enough to
+     tell two tiles apart at a glance, nowhere near enough to be mistaken for
+     the solid fill that means "this is live". */
   .cue {
+    /* Every shade a tile uses is derived from the cue's colour by *replacing*
+       its lightness, in OKLCH, keeping only hue and chroma. Two consequences,
+       both wanted:
+
+       - A state looks the same weight on every cue. Taking the colour as given
+         made a pale yellow cue shout at rest and a navy one vanish when live;
+         pinning L per state means "filled" is exactly as loud whatever hue the
+         operator picked, and the colour is left doing the one job it's good at,
+         which is telling cues apart.
+       - The text contrast is decided here rather than measured per cue. The
+         fill never leaves the light end of the scale, so ink on it is always
+         the dark one — no luminance maths, and no cue that lands near the
+         threshold and flips.
+
+       OKLCH rather than HSL because its L is perceptually even: HSL 50% yellow
+       and HSL 50% blue are nowhere near the same brightness, which is the exact
+       problem this is here to solve. */
+    --tint: oklch(from var(--cue-color) 0.245 calc(c * 0.55) h);
+    --edge: oklch(from var(--cue-color) 0.4 calc(c * 0.7) h);
+    --edge-hot: oklch(from var(--cue-color) 0.65 c h);
+    /* Live. Held to a narrow band near the top of the scale — the cue's own
+       lightness nudges it, but can't take it out of the range where dark ink
+       reads. */
+    --fill: oklch(from var(--cue-color) calc(0.72 + l * 0.1) c h);
+    --ink: #0e0f13;
+    --halo: oklch(from var(--cue-color) 0.7 c h / 0.6);
     position: relative;
     width: 100%;
     height: 100%;
     min-height: 0;
-    border-radius: 8px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: var(--cue-bg);
-    color: var(--cue-fg);
+    padding: 0;
+    border-radius: 10px;
+    border: 1px solid var(--edge);
+    background: var(--tint);
+    overflow: hidden;
+    transition:
+      box-shadow 0.07s linear,
+      border-color 0.12s ease;
+  }
+
+  /* Both copies of the text sit in the same place; only their ground differs. */
+  .layer {
+    position: absolute;
+    inset: 0;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 4px;
+    gap: 2px;
     padding: 6px;
-    overflow: hidden;
     text-align: center;
-    transition: filter 0.08s ease, box-shadow 0.07s linear;
-    filter: brightness(0.82) saturate(0.9);
   }
+  /* Make room for the scrub bar rather than letting it sit over the time it is
+     scrubbing. Applied to both copies of the text, so they stay aligned. */
+  .cue.active .layer {
+    padding-bottom: 20px;
+  }
+  .rest {
+    color: var(--text);
+  }
+  /* Named for what it is rather than for the state it represents. The obvious
+     name here is `.on`, and it was: it then also matched the hint rows' own
+     `.on` modifier further down, which handed every active trigger row the cue's
+     fill colour as a background. Svelte scopes styles per component, not per
+     subtree, so two unrelated meanings of one class name inside one file collide
+     silently — and this file has two independent little state machines in it. */
+  .filled {
+    background: var(--fill);
+    color: var(--ink);
+  }
+  .wedge,
+  .sweep,
+  .band {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+  /* The band is the only shape that animates: it rises when the cue goes live
+     and falls when it starts on its way out. The sweep across the wedge is
+     redrawn every frame off the audio clock, so a transition there would only
+     add lag to a value that is already smooth — and it never jumps, because a
+     playing cue keeps its wedge fully swept underneath the band. */
+  .band {
+    transition: clip-path 0.1s ease-out;
+  }
+  /* Neither wedge is drawn except while a fade is being drawn as one. The two
+     appear and leave at different moments, though, which is why this is a pair
+     of asymmetric transitions rather than one fade either way:
+
+     - Appearing is instant. A fade-out's wedge has to be *there*, full, for the
+       band to land on as it collapses over it; cross-fading it in over those
+       same 100ms would leave the handover looking like neither shape.
+     - Leaving takes the commit's own 100ms. A fade-in ends by handing over to a
+       band that starts at nothing, and a wedge that vanished on the same frame
+       would empty the tile before the band had filled it.
+
+     The ghost's own opacity follows below and must keep winning: it is the
+     track, not the fill, and it is never fully opaque. */
+  .wedge {
+    opacity: 0;
+    transition: opacity 0.1s ease-out;
+  }
+  .wedge.showing {
+    opacity: 1;
+    transition: none;
+  }
+  /* The unfilled wedge. Same colour as the fill, held far enough back to read
+     as the space the fill has yet to reach rather than as fill itself. Unlike
+     the filled wedge it does fade in: it is the empty track arriving, and it has
+     nothing to hand over to or from. */
+  .ghost {
+    background: var(--fill);
+    opacity: 0;
+    transition: opacity 0.1s ease-out;
+  }
+  .ghost.showing {
+    opacity: 0.22;
+    transition: opacity 0.1s ease-out;
+  }
+
+  .title {
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.15;
+    word-break: break-word;
+  }
+  /* Inside the faces, so the fill sweep repaints it along with the text rather
+     than leaving it stranded on the wrong ground. */
+  .mark {
+    position: absolute;
+    top: 4px;
+    left: 5px;
+    font-size: 10px;
+    line-height: 1;
+    opacity: 0.7;
+  }
+  .sub {
+    font-size: 10px;
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+    opacity: 0.62;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   /* Keyed off the hit area, not the tile — hovering the gap has to light the
      tile, which is the whole point of extending the target. */
   .hit:hover .cue,
   .cue:focus-visible {
-    filter: brightness(0.95);
-    box-shadow:
-      inset 0 0 0 2px rgba(255, 255, 255, 0.7),
-      inset 0 0 0 3px rgba(0, 0, 0, 0.5);
-    /* Hold the tile's own border: the global button:hover would otherwise
-       recolour it, but only when the pointer is over the tile and not the gap. */
-    border-color: rgba(255, 255, 255, 0.08);
-  }
-  .hit:hover .cue.missing {
-    border-color: var(--danger);
+    border-color: var(--edge-hot);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28);
   }
   .cue.active {
-    /* Brightness and glow spread track the live output loudness (--glow 0..1). */
-    filter: brightness(calc(1.08 + var(--glow, 0) * 0.5)) saturate(1.15);
+    /* Spread tracks the live output loudness (--glow 0..1), so a tile breathes
+       with what it is putting out. */
+    box-shadow: 0 0 calc(6px + var(--glow, 0) * 34px) var(--halo);
+  }
+  .hit:hover .cue.active {
     box-shadow:
-      0 0 0 2px rgba(255, 255, 255, 0.5),
-      0 0 calc(8px + var(--glow, 0) * 44px) var(--cue-bg);
+      inset 0 0 0 1px rgba(255, 255, 255, 0.28),
+      0 0 calc(6px + var(--glow, 0) * 34px) var(--halo);
   }
   .cue.selected {
     outline: 2px solid #fff;
@@ -333,83 +562,73 @@
     border-style: dashed;
     border-color: var(--danger);
   }
-  /* Still decoding: keep the cue's own colour — it isn't broken, just not ready
-     yet — held back so it reads as not-yet-available. Static: the "loading"
-     label already says it's working, and a pulse would add motion the eye keeps
-     checking without learning anything from. */
+  /* Still decoding: the cue isn't broken, just not ready yet. Static — the
+     "loading" line already says it's working, and a pulse would add motion the
+     eye keeps checking without learning anything from. */
   .cue.pending {
-    filter: brightness(0.6) saturate(0.6);
+    opacity: 0.55;
   }
   /* Nothing wrong with the cue — it just has nowhere to run right now. Drained
      of colour rather than dimmed, so it reads as "not available" instead of
      "still loading", and the pointer says the click won't do anything. */
   .cue.unavailable {
-    filter: brightness(0.55) saturate(0.15);
+    filter: saturate(0.1);
+    opacity: 0.6;
   }
   .hit.unavailable {
     cursor: not-allowed;
   }
-  .label {
-    font-size: 13px;
-    font-weight: 600;
-    line-height: 1.15;
-    word-break: break-word;
-  }
-  /* Reserves the row so tiles don't reflow as cues start and stop. */
-  .state {
+
+  /* The scrub bar. Pinned across the foot of the tile with its own ground, so
+     it reads the same whether the fill has reached it or not — it is the one
+     control here that must stay legible in every state. */
+  .scrub {
+    position: absolute;
+    left: 5px;
+    right: 5px;
+    bottom: 4px;
+    height: 12px;
     display: flex;
     align-items: center;
-    justify-content: center;
-    min-height: 16px;
+    cursor: ew-resize;
+    touch-action: none;
   }
-  /* Every state reads as a static glyph plus a word. The only thing that moves
-     is the fade bar below, and it moves because its position *is* the
-     information — how much of the fade is left. */
-  .chip {
-    display: inline-flex;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 2px;
-    font-size: 9px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 2px 6px;
-    border-radius: 7px;
-    background: rgba(0, 0, 0, 0.32);
-    backdrop-filter: blur(2px);
-    line-height: 1;
-  }
-  .chip .row {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 4px;
-  }
-  .glyph {
-    font-size: 8px;
-    line-height: 1;
-  }
-  .chip-loading {
-    opacity: 0.7;
-  }
-  .chip-fadingOut {
-    background: rgba(0, 0, 0, 0.45);
-  }
-
-  /* Fade progress: fills as the fade completes, so the bar is empty the instant
-     it starts and full as it lands. */
-  .fadebar {
-    display: block;
-    height: 2px;
-    border-radius: 1px;
-    background: rgba(255, 255, 255, 0.22);
+  .rail {
+    position: relative;
+    flex: 1;
+    height: 8px;
+    border-radius: 4px;
+    background: rgba(8, 10, 14, 0.45);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
     overflow: hidden;
   }
-  .fadebar .fill {
-    display: block;
-    height: 100%;
-    background: currentColor;
+  .elapsed {
+    position: absolute;
+    inset: 0;
+    transform-origin: left center;
+    transform: scaleX(var(--played, 0));
+    background: rgba(255, 255, 255, 0.55);
+  }
+  /* Sized and inset so the knob's travel stops at the rail's ends rather than
+     hanging off them. */
+  .knob {
+    position: absolute;
+    top: 50%;
+    left: calc(6px + var(--played, 0) * (100% - 12px));
+    width: 12px;
+    height: 12px;
+    margin-left: -6px;
+    margin-top: -6px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 0 0 1px rgba(8, 10, 14, 0.6);
+    pointer-events: none;
+  }
+  .scrub:hover .knob,
+  .scrub.scrubbing .knob {
+    box-shadow:
+      0 0 0 1px rgba(8, 10, 14, 0.6),
+      0 0 0 4px rgba(255, 255, 255, 0.22);
   }
 
   /* Hovering a cue marks up every tile it drives. Nothing shows at rest, so the
@@ -418,9 +637,7 @@
      grey for what happens later in the hovered cue's life. */
   /* Drawn as a pseudo-element border rather than box-shadow or outline: a
      targeted cue may also be playing (box-shadow carries the level glow) or
-     selected (outline), and this must never take either of those away. It also
-     stays deliberately quieter than the hovered cue's own highlight — the
-     badges carry the detail, this only says "and this one". */
+     selected (outline), and this must never take either of those away. */
   /* The ring is always present but transparent, so adding .targeted fades it in
      over the same 120ms as the badges. Creating the pseudo-element only when
      targeted would give the transition nothing to start from, and it would pop. */
@@ -451,78 +668,6 @@
       inset 0 0 0 3px rgba(0, 0, 0, 0.3);
   }
 
-  /* Tucked into the top-right corner, clear of the type badges opposite and of
-     the name and playback state in the middle. The panel gives the glyphs their
-     own dark ground so they read the same on every tile, instead of sitting
-     directly on a cue colour they'd otherwise blend into. */
-  .hints {
-    position: absolute;
-    top: 4px;
-    right: 4px;
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 2px;
-    padding: 3px;
-    border-radius: 6px;
-    background: rgba(8, 10, 14, 0.86);
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
-    pointer-events: none;
-  }
-  .hint {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-  }
-  .box {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 16px;
-    height: 16px;
-    padding: 0 3px;
-    font-size: 10px;
-    line-height: 1;
-    border-radius: 3px;
-    /* The panel already supplies the contrast, so the chips stay flat. */
-    background: rgba(255, 255, 255, 0.08);
-    color: rgba(255, 255, 255, 0.7);
-  }
-  /* The event box says merely when; the action box is the payload. */
-  .hint .what {
-    background: rgba(255, 255, 255, 0.16);
-    color: #fff;
-  }
-  .hint.now .when {
-    color: var(--accent);
-  }
-  .hint.now .what {
-    background: var(--accent);
-    color: #fff;
-  }
-
-  .badges {
-    position: absolute;
-    top: 4px;
-    left: 4px;
-    display: flex;
-    gap: 3px;
-  }
-  .badge {
-    font-size: 9px;
-    font-weight: 700;
-    background: rgba(0, 0, 0, 0.35);
-    padding: 1px 4px;
-    border-radius: 4px;
-  }
-  .progress {
-    position: absolute;
-    left: 0;
-    bottom: 0;
-    height: 3px;
-    background: rgba(255, 255, 255, 0.9);
-  }
   .flash {
     position: absolute;
     inset: 0;

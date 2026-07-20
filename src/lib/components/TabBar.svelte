@@ -52,6 +52,7 @@
   <div class="tabbar" ondragleave={() => (dropId = null)} role="tablist" tabindex="-1">
     {#each project.tabs as tab, i (tab.id)}
       {#if editingId === tab.id}
+        <!-- svelte-ignore a11y_autofocus -->
         <input
           class="tabname"
           value={tab.name}

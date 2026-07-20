@@ -46,8 +46,9 @@
     </div>
 
     <div class="row">
-      <label>Grid</label>
+      <label for="grid-cols">Grid</label>
       <input
+        id="grid-cols"
         class="num"
         type="number"
         min="1"
@@ -65,6 +66,7 @@
         value={project.grid.rows}
         oninput={(e) => app.setGrid(+e.currentTarget.value, project.grid.cols)}
         title="Rows"
+        aria-label="Rows"
       />
     </div>
 
@@ -154,8 +156,9 @@
     </div>
 
     <div class="row">
-      <label>Master</label>
+      <label for="master-volume">Master</label>
       <input
+        id="master-volume"
         type="range"
         min="0"
         max="1"

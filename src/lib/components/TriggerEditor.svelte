@@ -95,7 +95,7 @@
 
 <div class="triggers">
   <div class="row head">
-    <label>Triggers</label>
+    <span>Triggers</span>
     <button class="ghost" onclick={addTrigger}>+ Add</button>
   </div>
 

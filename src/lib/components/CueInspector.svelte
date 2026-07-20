@@ -82,41 +82,55 @@
         {#if cue.type === 'audio'}
           {@const c = cue as AudioCue}
           <div class="field">
-            <label>Name</label>
-            <input bind:value={c.name} oninput={() => app.markDirty()} placeholder="(unnamed)" />
+            <label>
+              Name
+              <input bind:value={c.name} oninput={() => app.markDirty()} placeholder="(unnamed)" />
+            </label>
           </div>
           <div class="field">
-            <label>File</label>
-            <select value={c.file} onchange={(e) => onFileChange(c, e.currentTarget.value)}>
-              <option value="">— none —</option>
-              {#each app.audioFiles as f (f)}
-                <option value={f}>{f}</option>
-              {/each}
-            </select>
+            <label>
+              File
+              <select value={c.file} onchange={(e) => onFileChange(c, e.currentTarget.value)}>
+                <option value="">— none —</option>
+                {#each app.audioFiles as f (f)}
+                  <option value={f}>{f}</option>
+                {/each}
+              </select>
+            </label>
             {#if c.file && !app.hasBuffer(c.id)}<span class="warn">not loaded</span>{/if}
           </div>
           <div class="field">
-            <label>Colour</label>
-            <input type="color" bind:value={c.color} oninput={() => app.markDirty()} />
+            <label>
+              Colour
+              <input type="color" bind:value={c.color} oninput={() => app.markDirty()} />
+            </label>
           </div>
           <div class="grid2">
             <div class="field">
-              <label>Start (s)</label>
-              <input type="number" min="0" step="0.1" bind:value={c.startTime} oninput={() => app.markDirty()} />
+              <label>
+                Start (s)
+                <input type="number" min="0" step="0.1" bind:value={c.startTime} oninput={() => app.markDirty()} />
+              </label>
             </div>
             <div class="field">
-              <label>End (s, blank = end)</label>
-              <input value={endTimeStr(c)} oninput={(e) => setEndTime(c, e.currentTarget.value)} />
+              <label>
+                End (s, blank = end)
+                <input value={endTimeStr(c)} oninput={(e) => setEndTime(c, e.currentTarget.value)} />
+              </label>
             </div>
           </div>
           <div class="grid2">
             <div class="field">
-              <label>Fade in (s)</label>
-              <input type="number" min="0" step="0.1" bind:value={c.fadeIn} oninput={() => app.markDirty()} />
+              <label>
+                Fade in (s)
+                <input type="number" min="0" step="0.1" bind:value={c.fadeIn} oninput={() => app.markDirty()} />
+              </label>
             </div>
             <div class="field">
-              <label>Fade out (s)</label>
-              <input type="number" min="0" step="0.1" bind:value={c.fadeOut} oninput={() => app.markDirty()} />
+              <label>
+                Fade out (s)
+                <input type="number" min="0" step="0.1" bind:value={c.fadeOut} oninput={() => app.markDirty()} />
+              </label>
             </div>
           </div>
           <label class="check">
@@ -131,100 +145,102 @@
             />
             Fade out at end too
           </label>
-          <span class="hint">
-            {#if c.loop}
-              A looping cue never reaches its end, so this doesn't apply.
-            {:else if c.fadeOut <= 0}
-              Set a fade-out time above to enable this.
-            {:else}
-              Also fades over {c.fadeOut}s onto the {c.endTime == null ? 'end of the file' : 'end time'},
-              instead of cutting. The cue still ends at the same moment.
-            {/if}
-          </span>
           <div class="field">
-            <label>Volume: {Math.round(c.volume * 100)}%</label>
-            <input type="range" min="0" max="2" step="0.01" bind:value={c.volume} oninput={() => app.markDirty()} />
-            <span class="hint">100% = loudness-matched on import; raise or lower to taste.</span>
+            <label>
+              Volume: {Math.round(c.volume * 100)}%
+              <input type="range" min="0" max="2" step="0.01" bind:value={c.volume} oninput={() => app.markDirty()} />
+            </label>
           </div>
           <div class="grid2">
             <label class="check">
               <input type="checkbox" bind:checked={c.loop} onchange={() => app.markDirty()} /> Loop
             </label>
             <div class="field">
-              <label>On stop</label>
-              <select bind:value={c.onStopBehavior} onchange={() => app.markDirty()}>
-                <option value={'stop' as StopBehavior}>Stop (reset)</option>
-                <option value={'pause' as StopBehavior}>Pause (resume)</option>
-              </select>
+              <label>
+                On stop
+                <select bind:value={c.onStopBehavior} onchange={() => app.markDirty()}>
+                  <option value={'stop' as StopBehavior}>Stop (reset)</option>
+                  <option value={'pause' as StopBehavior}>Pause (resume)</option>
+                </select>
+              </label>
             </div>
           </div>
         {:else if cue.type === 'proxy'}
           {@const c = cue as ProxyCue}
-          <p class="hint">Mirrors another cue and controls the same instance.</p>
           <div class="field">
+            <!-- svelte-ignore a11y_label_has_associated_control -->
             <label>Source</label>
             <CuePicker target={c.source} />
           </div>
         {:else if cue.type === 'timer'}
           {@const c = cue as TimerCue}
-          <p class="hint">Controls the single global timer slot.</p>
           <div class="field">
-            <label>Name</label>
-            <input bind:value={c.name} oninput={() => app.markDirty()} placeholder="(unnamed)" />
+            <label>
+              Name
+              <input bind:value={c.name} oninput={() => app.markDirty()} placeholder="(unnamed)" />
+            </label>
           </div>
           <div class="field">
-            <label>Colour</label>
-            <input type="color" bind:value={c.color} oninput={() => app.markDirty()} />
+            <label>
+              Colour
+              <input type="color" bind:value={c.color} oninput={() => app.markDirty()} />
+            </label>
           </div>
           <div class="field">
-            <label>Action</label>
-            <select bind:value={c.action} onchange={() => app.markDirty()}>
-              <option value={'set' as TimerAction}>Set &amp; start</option>
-              <option value={'pause' as TimerAction}>Pause</option>
-              <option value={'resume' as TimerAction}>Resume</option>
-              <option value={'clear' as TimerAction}>Clear</option>
-            </select>
+            <label>
+              Action
+              <select bind:value={c.action} onchange={() => app.markDirty()}>
+                <option value={'set' as TimerAction}>Set &amp; start</option>
+                <option value={'pause' as TimerAction}>Pause</option>
+                <option value={'resume' as TimerAction}>Resume</option>
+                <option value={'clear' as TimerAction}>Clear</option>
+              </select>
+            </label>
           </div>
           {#if c.action === 'set'}
             <div class="field">
-              <label>Duration (s)</label>
-              <input type="number" min="0" step="1" bind:value={c.duration} oninput={() => app.markDirty()} />
+              <label>
+                Duration (s)
+                <input type="number" min="0" step="1" bind:value={c.duration} oninput={() => app.markDirty()} />
+              </label>
             </div>
           {/if}
         {:else if cue.type === 'video'}
           {@const c = cue as VideoCue}
-          <p class="hint">
-            Puts a clip on the screen pop-out. There's one video slot for the whole app, and it
-            outranks the timer — the clock floats out while the picture is up, and back in when it
-            goes. Clips play straight off disk, so nothing is loaded until the cue fires, and a
-            video cue does nothing while the screen window is closed.
-          </p>
           <div class="field">
-            <label>Name</label>
-            <input bind:value={c.name} oninput={() => app.markDirty()} placeholder="(unnamed)" />
+            <label>
+              Name
+              <input bind:value={c.name} oninput={() => app.markDirty()} placeholder="(unnamed)" />
+            </label>
           </div>
           <div class="field">
-            <label>Colour</label>
-            <input type="color" bind:value={c.color} oninput={() => app.markDirty()} />
+            <label>
+              Colour
+              <input type="color" bind:value={c.color} oninput={() => app.markDirty()} />
+            </label>
           </div>
           <div class="field">
-            <label>Action</label>
-            <select bind:value={c.action} onchange={() => app.markDirty()}>
-              <option value={'play' as VideoAction}>Play clip</option>
-              <option value={'pause' as VideoAction}>Pause</option>
-              <option value={'resume' as VideoAction}>Resume</option>
-              <option value={'clear' as VideoAction}>Clear screen</option>
-            </select>
+            <label>
+              Action
+              <select bind:value={c.action} onchange={() => app.markDirty()}>
+                <option value={'play' as VideoAction}>Play clip</option>
+                <option value={'pause' as VideoAction}>Pause</option>
+                <option value={'resume' as VideoAction}>Resume</option>
+                <option value={'clear' as VideoAction}>Clear screen</option>
+              </select>
+            </label>
           </div>
           {#if c.action === 'play'}
             <div class="field">
-              <label>Clip</label>
-              <select bind:value={c.file} onchange={() => app.markDirty()}>
-                <option value="">— none —</option>
-                {#each app.videoFiles as f (f)}
-                  <option value={f}>{f}</option>
-                {/each}
-              </select>
+              <label>
+                Clip
+                <select bind:value={c.file} onchange={() => app.markDirty()}>
+                  <option value="">— none —</option>
+                  {#each app.videoFiles as f (f)}
+                    <option value={f}>{f}</option>
+                  {/each}
+                </select>
+              </label>
               {#if app.videoFiles.length === 0}
                 <span class="hint">No video files in this project folder.</span>
               {/if}
@@ -234,48 +250,41 @@
                 <input type="checkbox" bind:checked={c.loop} onchange={() => app.markDirty()} /> Loop
               </label>
               <div class="field">
-                <label>Fit</label>
-                <select bind:value={c.fit} onchange={() => app.markDirty()}>
-                  <option value={'contain' as VideoFit}>Fit (letterbox)</option>
-                  <option value={'cover' as VideoFit}>Fill (crop)</option>
-                </select>
+                <label>
+                  Fit
+                  <select bind:value={c.fit} onchange={() => app.markDirty()}>
+                    <option value={'contain' as VideoFit}>Fit (letterbox)</option>
+                    <option value={'cover' as VideoFit}>Fill (crop)</option>
+                  </select>
+                </label>
               </div>
             </div>
             <div class="field">
-              <label>On click while it's up</label>
-              <select bind:value={c.onStopBehavior} onchange={() => app.markDirty()}>
-                <option value={'stop' as StopBehavior}>Clear the screen</option>
-                <option value={'pause' as StopBehavior}>Hold the frame (click to resume)</option>
-              </select>
-              <span class="hint">
-                {c.onStopBehavior === 'pause'
-                  ? 'Clicking again freezes the clip on screen; a third click picks it up where it left off.'
-                  : 'Clicking again takes the picture off the screen.'}
-              </span>
+              <label>
+                On click while it's up
+                <select bind:value={c.onStopBehavior} onchange={() => app.markDirty()}>
+                  <option value={'stop' as StopBehavior}>Clear the screen</option>
+                  <option value={'pause' as StopBehavior}>Hold the frame (click to resume)</option>
+                </select>
+              </label>
             </div>
             <div class="field">
-              <label>Volume: {c.muted ? 'muted' : `${Math.round(c.volume * 100)}%`}</label>
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
-                disabled={c.muted}
-                bind:value={c.volume}
-                oninput={() => app.markDirty()}
-              />
+              <label>
+                Volume: {c.muted ? 'muted' : `${Math.round(c.volume * 100)}%`}
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  disabled={c.muted}
+                  bind:value={c.volume}
+                  oninput={() => app.markDirty()}
+                />
+              </label>
             </div>
             <label class="check">
               <input type="checkbox" bind:checked={c.muted} onchange={() => app.markDirty()} /> Mute
             </label>
-            <span class="hint">
-              The clip's own soundtrack plays through the screen window, not the audio engine — so
-              master volume, fades, and “stop all” don't reach it.
-            </span>
-            <span class="hint">
-              Ends by itself: the clip leaves the screen when it finishes, firing its
-              <em>on end</em> triggers.
-            </span>
             {#if !app.screenLive}
               <span class="warn">
                 No screen window is open, so video cues do nothing at all — not even their triggers.
@@ -285,72 +294,75 @@
           {/if}
         {:else if cue.type === 'global'}
           {@const c = cue as GlobalCue}
-          <p class="hint">
-            Applies one action to every audio cue at once — no target needed. Cues that aren't
-            playing are left alone, and so is whatever set this off: a jingle whose
-            <em>on start</em> runs this cue ducks the show and keeps playing itself.
-          </p>
           <div class="field">
-            <label>Name</label>
-            <input bind:value={c.name} oninput={() => app.markDirty()} placeholder="(unnamed)" />
+            <label>
+              Name
+              <input bind:value={c.name} oninput={() => app.markDirty()} placeholder="(unnamed)" />
+            </label>
           </div>
           <div class="field">
-            <label>Colour</label>
-            <input type="color" bind:value={c.color} oninput={() => app.markDirty()} />
+            <label>
+              Colour
+              <input type="color" bind:value={c.color} oninput={() => app.markDirty()} />
+            </label>
           </div>
           <div class="field">
-            <label>Action</label>
-            <select bind:value={c.action} onchange={() => app.markDirty()}>
-              <option value={'stop' as GlobalAction}>Stop all</option>
-              <option value={'pause' as GlobalAction}>Pause all</option>
-              <option value={'resume' as GlobalAction}>Resume all</option>
-            </select>
+            <label>
+              Action
+              <select bind:value={c.action} onchange={() => app.markDirty()}>
+                <option value={'stop' as GlobalAction}>Stop all</option>
+                <option value={'pause' as GlobalAction}>Pause all</option>
+                <option value={'resume' as GlobalAction}>Resume all</option>
+              </select>
+            </label>
           </div>
           <div class="field">
-            <label>Scope</label>
-            <select bind:value={c.scope} onchange={() => app.markDirty()}>
-              <option value={'document' as GlobalScope}>This cue file</option>
-              <option value={'all' as GlobalScope}>Every open cue file</option>
-            </select>
-            {#if c.scope === 'all'}
-              <span class="hint">Reaches into other open tabs too — a true panic button.</span>
-            {/if}
+            <label>
+              Scope
+              <select bind:value={c.scope} onchange={() => app.markDirty()}>
+                <option value={'document' as GlobalScope}>This cue file</option>
+                <option value={'all' as GlobalScope}>Every open cue file</option>
+              </select>
+            </label>
           </div>
           <label class="check">
             <input type="checkbox" bind:checked={c.fade} onchange={() => app.markDirty()} />
             Use each cue's own fade
           </label>
-          <span class="hint">
-            {c.fade
-              ? 'Each cue fades out over its own configured fade time.'
-              : 'Everything stops instantly, ignoring fade settings.'}
-          </span>
         {:else if cue.type === 'http'}
           {@const c = cue as HttpCue}
           <div class="field">
-            <label>Name</label>
-            <input bind:value={c.name} oninput={() => app.markDirty()} />
+            <label>
+              Name
+              <input bind:value={c.name} oninput={() => app.markDirty()} />
+            </label>
           </div>
           <div class="field">
-            <label>Colour</label>
-            <input type="color" bind:value={c.color} oninput={() => app.markDirty()} />
+            <label>
+              Colour
+              <input type="color" bind:value={c.color} oninput={() => app.markDirty()} />
+            </label>
           </div>
           <div class="grid2">
             <div class="field">
-              <label>Method</label>
-              <select bind:value={c.method} onchange={() => app.markDirty()}>
-                {#each ['GET', 'POST', 'PUT', 'DELETE'] as m}
-                  <option value={m as HttpMethod}>{m}</option>
-                {/each}
-              </select>
+              <label>
+                Method
+                <select bind:value={c.method} onchange={() => app.markDirty()}>
+                  {#each ['GET', 'POST', 'PUT', 'DELETE'] as m}
+                    <option value={m as HttpMethod}>{m}</option>
+                  {/each}
+                </select>
+              </label>
             </div>
             <div class="field">
-              <label>URL</label>
-              <input bind:value={c.url} oninput={() => app.markDirty()} placeholder="http://…" />
+              <label>
+                URL
+                <input bind:value={c.url} oninput={() => app.markDirty()} placeholder="http://…" />
+              </label>
             </div>
           </div>
           <div class="field">
-            <label>Headers</label>
+            <span class="label-text">Headers</span>
             {#each headerRows(c) as [k, v], i (i)}
               <div class="hrow">
                 <input
@@ -382,8 +394,10 @@
           </div>
           {#if c.method !== 'GET'}
             <div class="field">
-              <label>Body</label>
-              <textarea rows="3" bind:value={c.body} oninput={() => app.markDirty()}></textarea>
+              <label>
+                Body
+                <textarea rows="3" bind:value={c.body} oninput={() => app.markDirty()}></textarea>
+              </label>
             </div>
           {/if}
         {/if}
@@ -460,9 +474,14 @@
     flex-direction: column;
     gap: 4px;
   }
-  .field > input,
-  .field > select,
-  .field > textarea {
+  .field > label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .field input,
+  .field select,
+  .field textarea {
     width: 100%;
   }
   .grid2 {
@@ -475,6 +494,9 @@
     display: flex;
     align-items: center;
     gap: 6px;
+    color: var(--text);
+  }
+  .label-text {
     color: var(--text);
   }
   .hrow {

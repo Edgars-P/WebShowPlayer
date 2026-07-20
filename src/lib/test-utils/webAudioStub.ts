@@ -57,13 +57,17 @@ class StubNode {
   onended: (() => void) | null = null;
   /** Arguments the source was started with: [when, offset, duration]. */
   startArgs: number[] | null = null;
+  /** Whether the source has been stopped (a seek retires the old one). */
+  stopped = false;
   connect() {}
   disconnect() {}
   getFloatTimeDomainData() {}
   start(...args: number[]) {
     this.startArgs = args;
   }
-  stop() {}
+  stop() {
+    this.stopped = true;
+  }
 }
 
 /**
@@ -82,6 +86,22 @@ export function lastGainNode(): { events: GainEvent[] } | undefined {
 
 export function allGainNodes(): { events: GainEvent[] }[] {
   return gainNodes;
+}
+
+/** Buffer sources created since the last reset, newest last. */
+const sourceNodes: StubNode[] = [];
+
+export function resetSourceNodes(): void {
+  sourceNodes.length = 0;
+}
+
+/** The most recently created buffer source — the one a cue is playing through. */
+export function lastSourceNode(): StubNode | undefined {
+  return sourceNodes[sourceNodes.length - 1];
+}
+
+export function allSourceNodes(): StubNode[] {
+  return sourceNodes;
 }
 
 /**
@@ -110,7 +130,9 @@ export function installAudioStubs(): StubCounters & { restore: () => void } {
       return node;
     }
     createBufferSource() {
-      return new StubNode();
+      const node = new StubNode();
+      sourceNodes.push(node);
+      return node;
     }
     createAnalyser() {
       return new StubNode();

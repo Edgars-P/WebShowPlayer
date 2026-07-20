@@ -16,7 +16,7 @@ import {
   readCueFile,
 } from '../fs/projectFs';
 import { defaultProject, type Cue, type Tab, type TriggerAction } from '../types';
-import { EMPTY_TIMER, type TimerView } from '../timer/timer';
+import { EMPTY_TIMER, remainingFraction, type TimerView } from '../timer/timer';
 import { EMPTY_VIDEO, IDLE_STATUS, ScreenWindow, type VideoStatus, type VideoView } from '../screen/screen';
 import { Doc, type CueDisplay, type TriggerHint, type ScreenHost, type VideoRequest } from './doc.svelte';
 import { Folder } from './folder.svelte';
@@ -69,6 +69,8 @@ export class AppState implements ScreenHost {
 
   /** The single global countdown timer slot, shared by all documents. */
   timer = $state<TimerView>({ ...EMPTY_TIMER });
+  /** The timer cue currently holding the countdown, so its tile can show it. */
+  timerCueId = $state<string | null>(null);
   /** The single global video slot, shared by all documents. */
   video = $state<VideoView>({ ...EMPTY_VIDEO });
   /**
@@ -423,6 +425,18 @@ export class AppState implements ScreenHost {
   fadeProgress(cue: Parameters<Doc['fadeProgress']>[0]): number {
     return this.activeDoc?.fadeProgress(cue) ?? 1;
   }
+  fadeSeconds(cue: Parameters<Doc['fadeSeconds']>[0]): number {
+    return this.activeDoc?.fadeSeconds(cue) ?? 0;
+  }
+  remaining(cue: Parameters<Doc['remaining']>[0]): number {
+    return this.activeDoc?.remaining(cue) ?? 0;
+  }
+  duration(cue: Parameters<Doc['duration']>[0]): number {
+    return this.activeDoc?.duration(cue) ?? 0;
+  }
+  seekTo(cue: Parameters<Doc['seekTo']>[0], fraction: number): void {
+    this.activeDoc?.seekTo(cue, fraction);
+  }
   resolveRef(ref: Parameters<Doc['resolveRef']>[0]) {
     return this.activeDoc?.resolveRef(ref) ?? null;
   }
@@ -494,8 +508,49 @@ export class AppState implements ScreenHost {
 
   // ---- Global timer ------------------------------------------------------
 
-  claimTimer(onFinished: () => void): void {
+  /**
+   * Hand the countdown to a cue: its chain runs when the clock reaches zero,
+   * and its tile is the one that lights while it runs. One holder at a time,
+   * like the video slot — a second `set` cue takes the timer over rather than
+   * sharing it, so exactly one tile ever shows the countdown.
+   */
+  claimTimer(cueId: string | null, onFinished: () => void): void {
+    this.timerCueId = cueId;
     this.onTimerFinished = onFinished;
+  }
+
+  /** Whether the given cue is the one holding the countdown right now. */
+  ownsTimer(cueId: string): boolean {
+    return this.timerCueId === cueId && this.timer.duration > 0 && !this.timer.finished;
+  }
+
+  /**
+   * How far through the countdown, 0..1 — the timer cue's progress bar. Counted
+   * as time *spent*, not time left, so the bar fills the way every other cue's
+   * does; the tile's own readout is what says how much is left.
+   */
+  get timerProgressFraction(): number {
+    return this.timer.duration <= 0 ? 0 : 1 - remainingFraction(this.timer);
+  }
+
+  /**
+   * Scrub the countdown to a fraction (0..1) of its length.
+   *
+   * The duration is left alone — the cue was set for that long, and dragging
+   * the bar is moving the playhead within it, not redefining it. A running
+   * clock gets a new end time to match; a paused one just keeps the number,
+   * and starts from there when it resumes.
+   */
+  seekTimer(fraction: number): void {
+    const dur = this.timer.duration;
+    if (dur <= 0) return;
+    const spent = Math.min(1, Math.max(0, fraction)) * dur;
+    this.timer.remaining = Math.max(0, dur - spent);
+    if (this.timer.running) {
+      this.timerEndsAt = Date.now() + this.timer.remaining * 1000;
+      this.timer.endsAt = this.timerEndsAt;
+    }
+    this.renderScreen();
   }
 
   setTimer(seconds: number): void {
@@ -539,6 +594,7 @@ export class AppState implements ScreenHost {
     this.timer.finished = false;
     this.timer.endsAt = null;
     this.onTimerFinished = null;
+    this.timerCueId = null;
     this.stopTimerInterval();
     this.renderScreen();
   }
@@ -601,6 +657,24 @@ export class AppState implements ScreenHost {
     const { position, duration } = this.videoStatus;
     if (duration <= 0) return 0;
     return Math.min(1, Math.max(0, position / duration));
+  }
+
+  /**
+   * Scrub the clip on screen to a fraction (0..1) of its length.
+   *
+   * The screen page owns the media element, so this only asks; the readout it
+   * pushes back is what the tile normally paints from, and that won't move
+   * until the seek lands a frame or two later. Nudging the local copy first
+   * keeps the scrub handle under the pointer instead of snapping back.
+   */
+  seekVideo(fraction: number): void {
+    const { duration } = this.videoStatus;
+    if (!this.video.file || duration <= 0) return;
+    const position = Math.min(1, Math.max(0, fraction)) * duration;
+    this.video.seekPosition = position;
+    this.video.seekToken++;
+    this.videoStatus = { ...this.videoStatus, position };
+    this.renderScreen();
   }
 
   claimVideo(onEnded: () => void): void {

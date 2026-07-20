@@ -36,6 +36,17 @@ export interface VideoView {
   /** 0..1, the clip's own audio track. Independent of the Web Audio master. */
   volume: number;
   fit: VideoFit;
+  /**
+   * Where the opener wants the clip moved to, in seconds.
+   *
+   * The position itself can't be the signal — scrubbing back to a spot the clip
+   * has already passed would be a no-op — so the token is what the page watches,
+   * and it's bumped on every request. Monotonic for the life of the app: a page
+   * that attaches mid-show adopts whatever token it finds without seeking, so a
+   * stale request can't yank a running clip.
+   */
+  seekToken: number;
+  seekPosition: number;
 }
 
 export interface ScreenView {
@@ -85,6 +96,8 @@ export const EMPTY_VIDEO: VideoView = {
   muted: false,
   volume: 1,
   fit: 'contain',
+  seekToken: 0,
+  seekPosition: 0,
 };
 
 const EMPTY_VIEW: ScreenView = { timer: EMPTY_TIMER, video: EMPTY_VIDEO };

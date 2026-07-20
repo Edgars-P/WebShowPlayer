@@ -43,6 +43,8 @@
   let wantPlaying = $derived(view.playing);
   let volume = $derived(view.volume);
   let loop = $derived(view.loop);
+  let seekToken = $derived(view.seekToken);
+  let seekPosition = $derived(view.seekPosition);
 
   // One object URL per loaded clip. Keyed on `generation` as well as the File so
   // that re-firing the same clip mints a fresh URL and restarts it from zero,
@@ -81,6 +83,31 @@
     if (!v) return;
     v.volume = Math.min(1, Math.max(0, volume));
     v.loop = loop;
+  });
+
+  /**
+   * The last seek this page has carried out, and the clip it belonged to. Not
+   * reactive: it's a record of what's been done, and writing it must not re-run
+   * the effect that writes it.
+   */
+  let applied = { generation: -1, token: -1 };
+
+  // Scrubbing, from the tile on the operator's screen. A clip arriving is not a
+  // seek — the first sight of a new generation only adopts its token — so
+  // reloading the element never replays the previous clip's scrub position.
+  $effect(() => {
+    const v = el;
+    const g = generation;
+    const token = seekToken;
+    const at = seekPosition;
+    if (!v || !src) return;
+    if (applied.generation !== g) {
+      applied = { generation: g, token };
+      return;
+    }
+    if (applied.token === token) return;
+    applied = { generation: g, token };
+    v.currentTime = at;
   });
 
   // Report the element's real state back while a clip is up. The opener is the

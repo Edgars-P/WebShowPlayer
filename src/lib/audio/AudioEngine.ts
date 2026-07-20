@@ -174,6 +174,18 @@ export class AudioEngine {
     return Math.min(1, Math.max(0, (this.ctx.currentTime - pb.fadeFrom) / span));
   }
 
+  /**
+   * How long the fade in progress was asked to take, in seconds; 0 when the cue
+   * isn't fading. What's on the cue is only the request — an end-of-clip fade is
+   * cut to the audio that's left — so a readout that has to know how much time a
+   * fade has in it has to ask the playback, not the cue.
+   */
+  getFadeSeconds(id: string): number {
+    const pb = this.active.get(id);
+    if (!pb || pb.fadeUntil <= pb.fadeFrom) return 0;
+    return pb.fadeUntil - pb.fadeFrom;
+  }
+
   /** Live output loudness of a playing cue (RMS, 0..1). 0 if not playing. */
   getLevel(id: string): number {
     const pb = this.active.get(id);
@@ -326,6 +338,89 @@ export class AudioEngine {
       },
       Math.max(0, (start - this.ctx.currentTime) * 1000),
     );
+  }
+
+  /**
+   * Move a cue to a new position in its file (absolute seconds), without
+   * disturbing anything else about it.
+   *
+   * A running cue gets a fresh source node spliced onto its existing gain node,
+   * so whatever the fade automation is doing carries straight through the jump —
+   * scrubbing a cue that's easing in doesn't cut it to full and doesn't restart
+   * the fade. Nothing here fires an event: seeking is not starting or stopping,
+   * and a chain hanging off this cue must not go off because someone dragged a
+   * scrub bar.
+   *
+   * An idle or paused cue has no source to move, so the position is stored as
+   * its resume point instead — lining a cue up before firing it.
+   */
+  seek(cue: AudioCue, position: number): void {
+    const buffer = this.bufferFor(cue.id);
+    if (!buffer) return;
+    const end = Math.min(cue.endTime ?? buffer.duration, buffer.duration);
+    // Never land exactly on the out point: a zero-length playback would end the
+    // cue the instant it started, which is not what dragging to the far right
+    // of the bar asks for.
+    const pos = Math.min(Math.max(position, cue.startTime), Math.max(cue.startTime, end - 0.05));
+
+    const pb = this.active.get(cue.id);
+    if (!pb) {
+      this.paused.set(cue.id, pos);
+      return;
+    }
+    // On its way out already — the fade is landing on silence, and moving the
+    // audio under it would only make a mess of the last half-second.
+    if (pb.stopping || pb.finalized) return;
+
+    const now = this.ctx.currentTime;
+    const source = this.ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(pb.gain);
+    if (cue.loop) {
+      source.loop = true;
+      source.loopStart = cue.startTime;
+      source.loopEnd = end;
+    }
+
+    // Retire the old source silently: its `onended` fires as we stop it, and
+    // left alone it would finalize the cue as if the clip had played out.
+    const old = pb.source;
+    old.onended = null;
+    try {
+      old.stop();
+    } catch {
+      /* already stopped */
+    }
+    old.disconnect();
+
+    const playDur = Math.max(0, end - pos);
+    if (cue.loop) source.start(now, pos);
+    else source.start(now, pos, playDur);
+
+    pb.source = source;
+    pb.startedAt = now;
+    pb.offset = pos;
+    pb.endsAt = cue.loop ? 0 : now + playDur;
+    source.onended = () => {
+      if (!pb.finalized) this.finalize(pb, 'natural');
+    };
+
+    if (pb.state === 'fadingIn') {
+      // The fade-in ramp is already on the gain node and still correct; only the
+      // end-of-clip fade needs re-aiming, and it may not start before that ramp.
+      this.scheduleEndFade(pb, Math.max(now, pb.fadeUntil));
+    } else {
+      // Any end-of-clip fade was aimed at the old out point — including one
+      // already running, if the jump was backwards out of it. Wipe it, restore
+      // full level, and lay a fresh one down against the new out point.
+      pb.gain.gain.cancelScheduledValues(now);
+      pb.gain.gain.setValueAtTime(this.effectiveGain(cue), now);
+      if (pb.state !== 'playing') {
+        pb.fadeFrom = pb.fadeUntil = 0;
+        this.setState(pb, 'playing');
+      }
+      this.scheduleEndFade(pb, now);
+    }
   }
 
   /** Stop a cue. `fade` false => instant stop (trigger use).
