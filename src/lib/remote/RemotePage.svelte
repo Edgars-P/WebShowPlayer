@@ -150,6 +150,19 @@
 </div>
 
 <style>
+  /* app.css (shared with the main player) fixes html/body/#app to exactly one
+     viewport tall with `overflow: hidden` — right for the player's own
+     internally-scrolling panels, but it means this page's body can never
+     scroll, so a cue list longer than one screen is simply clipped. Override
+     it here: same selectors, so this just wins the cascade by coming later
+     (RemotePage is imported after app.css in remote-main.ts). */
+  :global(html),
+  :global(body) {
+    height: auto;
+    min-height: 100%;
+    overflow-y: auto;
+  }
+
   .remote {
     min-height: 100dvh;
     display: flex;

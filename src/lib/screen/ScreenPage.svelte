@@ -90,14 +90,21 @@
   :global(body),
   :global(#app) {
     margin: 0;
+    /* 100% falls back for browsers without dvh support; the dvh rule below
+       overrides it. Plain 100vh on a phone is sized against the layout
+       viewport, which can be taller than what's actually visible once the
+       address bar is showing — the bottom of the screen would then render
+       below the fold, unreachable, since scrolling is deliberately off. dvh
+       tracks the real visible height as the browser chrome shows/hides. */
     height: 100%;
+    height: 100dvh;
     background: #000;
     overflow: hidden;
   }
 
   .screen {
-    position: relative;
-    height: 100%;
+    position: fixed;
+    inset: 0;
     background: #000;
   }
 </style>
