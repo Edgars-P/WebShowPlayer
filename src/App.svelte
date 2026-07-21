@@ -10,6 +10,8 @@
   import CueFileChooser from './lib/components/CueFileChooser.svelte';
   import NewFilePrompt from './lib/components/NewFilePrompt.svelte';
   import TrelloSidebar from './lib/components/TrelloSidebar.svelte';
+  import RemoteBridge from './lib/components/RemoteBridge.svelte';
+  import RemotePanel from './lib/components/RemotePanel.svelte';
 
   // Once anything is open the shell stays up; the chooser becomes an overlay so
   // opening a second cue file never tears down the documents already loaded.
@@ -57,6 +59,12 @@
   <CueInspector />
   <ContextMenu />
 {/if}
+
+<!-- Top-level, so the remote keeps mirroring across documents opening and
+     closing: gated inside the shell, the bridge would unmount when the last
+     document closed and freeze a connected phone on stale cues. -->
+<RemoteBridge />
+<RemotePanel />
 
 <!-- Sits above both the shell and the chooser: naming a new file can be reached
      from either, including from the empty state before anything is open. -->

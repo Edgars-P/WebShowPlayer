@@ -1,6 +1,7 @@
 <script lang="ts">
   import { app } from '../state/project.svelte';
   import { trello } from '../state/trello.svelte';
+  import { remoteHost } from '../remote/remoteHost.svelte';
   import { formatTime, timerColor } from '../timer/timer';
 
   let project = $derived(app.project);
@@ -134,6 +135,14 @@
       >
         Trello
       </button>
+      <button
+        class="ghost"
+        class:on={remoteHost.enabled}
+        title="Control the player from a phone"
+        onclick={() => (remoteHost.panelOpen = !remoteHost.panelOpen)}
+      >
+        Remote{#if remoteHost.peerCount > 0}<span class="badge">{remoteHost.peerCount}</span>{/if}
+      </button>
     </div>
 
     <div class="row">
@@ -230,5 +239,16 @@
   .on {
     border-color: var(--accent);
     color: var(--accent);
+  }
+  .badge {
+    display: inline-block;
+    margin-left: 5px;
+    padding: 0 6px;
+    border-radius: 9px;
+    background: var(--ok);
+    color: #06210f;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 16px;
   }
 </style>
