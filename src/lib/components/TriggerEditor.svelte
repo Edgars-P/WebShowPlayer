@@ -5,29 +5,31 @@
 
   let { cue }: { cue: Cue } = $props();
 
-  const EVENTS_BY_TYPE: Record<Cue['type'], { value: TriggerEvent; label: string }[]> = {
-    audio: [
-      { value: 'onStart', label: 'After start' },
-      { value: 'onPause', label: 'After pause' },
-      { value: 'onStop', label: 'After stop' },
-      { value: 'onEnd', label: 'After it ends on its own' },
-    ],
-    proxy: [
-      { value: 'onStart', label: 'After start' },
-      { value: 'onPause', label: 'After pause' },
-      { value: 'onStop', label: 'After stop' },
-      { value: 'onEnd', label: 'After it ends on its own' },
-    ],
-    timer: [
-      { value: 'onStart', label: 'After it runs' },
-      { value: 'onStop', label: 'After it runs out' },
-    ],
-    video: [
-      { value: 'onStart', label: 'After it runs' },
-      { value: 'onEnd', label: 'After the clip ends on its own' },
-    ],
-    http: [{ value: 'onStart', label: 'After it fires' }],
-    global: [{ value: 'onStart', label: 'After it runs' }],
+  // Every event this cue type can fire a trigger from, in lifecycle order.
+  // Glyphs match the hover-hint badges (CueHints.svelte) so the vocabulary is
+  // the same wherever a trigger shows up; the label is what differs, since
+  // e.g. a timer's "onStop" means it ran out, not that something stopped it.
+  const EVENTS_BY_TYPE: Record<Cue['type'], TriggerEvent[]> = {
+    audio: ['onStart', 'onPause', 'onStop', 'onEnd'],
+    proxy: ['onStart', 'onPause', 'onStop', 'onEnd'],
+    timer: ['onStart', 'onStop'],
+    video: ['onStart', 'onEnd'],
+    http: ['onStart'],
+    global: ['onStart'],
+  };
+  const EVENT_GLYPH: Record<TriggerEvent, string> = {
+    onStart: '▶',
+    onPause: '⏸',
+    onStop: '⏹',
+    onEnd: '⇥',
+  };
+  const EVENT_LABEL: Record<Cue['type'], Partial<Record<TriggerEvent, string>>> = {
+    audio: { onStart: 'Start', onPause: 'Pause', onStop: 'Stop', onEnd: 'Ends on its own' },
+    proxy: { onStart: 'Start', onPause: 'Pause', onStop: 'Stop', onEnd: 'Ends on its own' },
+    timer: { onStart: 'Starts', onStop: 'Runs out' },
+    video: { onStart: 'Starts', onEnd: 'Ends on its own' },
+    http: { onStart: 'Fires' },
+    global: { onStart: 'Runs' },
   };
 
   interface ActionOption {
@@ -37,29 +39,29 @@
   }
 
   const AUDIO_ACTIONS: ActionOption[] = [
-    { value: 'click', label: 'Click (toggle)' },
+    { value: 'click', label: 'Toggle' },
     { value: 'start', label: 'Start', fadeable: true },
     { value: 'pause', label: 'Pause', fadeable: true },
     { value: 'resume', label: 'Resume', fadeable: true },
     { value: 'stop', label: 'Stop', fadeable: true },
   ];
   const TIMER_ACTIONS: ActionOption[] = [
-    { value: 'click', label: "Click (its own action)" },
+    { value: 'click', label: 'Run' },
     { value: 'set', label: 'Set & start' },
     { value: 'pause', label: 'Pause' },
     { value: 'resume', label: 'Resume' },
     { value: 'clear', label: 'Clear' },
   ];
   const VIDEO_ACTIONS: ActionOption[] = [
-    { value: 'click', label: "Click (its own action)" },
-    { value: 'start', label: 'Play its clip' },
+    { value: 'click', label: 'Run' },
+    { value: 'start', label: 'Play' },
     { value: 'pause', label: 'Pause' },
     { value: 'resume', label: 'Resume' },
     { value: 'clear', label: 'Clear screen' },
   ];
-  const HTTP_ACTIONS: ActionOption[] = [{ value: 'click', label: 'Fire request' }];
+  const HTTP_ACTIONS: ActionOption[] = [{ value: 'click', label: 'Fire' }];
   // A global cue carries its own action and scope, so a trigger just runs it.
-  const GLOBAL_ACTIONS: ActionOption[] = [{ value: 'click', label: 'Run (its own action)' }];
+  const GLOBAL_ACTIONS: ActionOption[] = [{ value: 'click', label: 'Run' }];
   const FALLBACK_ACTIONS: ActionOption[] = [{ value: 'click', label: 'Click' }];
 
   function actionsFor(target: CueRef): ActionOption[] {
@@ -75,7 +77,7 @@
 
   function addTrigger() {
     cue.triggers.push({
-      event: EVENTS_BY_TYPE[cue.type][0].value,
+      events: [EVENTS_BY_TYPE[cue.type][0]],
       target: { cueId: '' },
       action: 'click',
     });
@@ -84,6 +86,19 @@
 
   function remove(i: number) {
     cue.triggers.splice(i, 1);
+    app.markDirty();
+  }
+
+  function toggleEvent(trig: Trigger, ev: TriggerEvent) {
+    const pos = trig.events.indexOf(ev);
+    if (pos >= 0) {
+      // Always leave at least one event behind — turn off the last one with
+      // the trash button instead, which removes the whole trigger on purpose.
+      if (trig.events.length === 1) return;
+      trig.events.splice(pos, 1);
+    } else {
+      trig.events.push(ev);
+    }
     app.markDirty();
   }
 
@@ -100,32 +115,46 @@
   </div>
 
   {#each cue.triggers as trig, i (i)}
+    {@const targetCue = app.resolveRef(trig.target)}
     {@const actions = actionsFor(trig.target)}
     {@const fadeable = actions.find((o) => o.value === trig.action)?.fadeable}
     <div class="trig">
-      <div class="line">
-        <select bind:value={trig.event} onchange={() => app.markDirty()}>
-          {#each EVENTS_BY_TYPE[cue.type] as opt (opt.value)}
-            <option value={opt.value}>{opt.label}</option>
+      <div class="line events">
+        {#if EVENTS_BY_TYPE[cue.type].length > 1}
+          {#each EVENTS_BY_TYPE[cue.type] as ev (ev)}
+            <button
+              type="button"
+              class="evt"
+              class:active={trig.events.includes(ev)}
+              title={EVENT_LABEL[cue.type][ev]}
+              onclick={() => toggleEvent(trig, ev)}
+            >
+              {EVENT_GLYPH[ev]}
+            </button>
           {/each}
-        </select>
-        <select bind:value={trig.action} onchange={() => app.markDirty()}>
-          {#each actions as opt (opt.value)}
-            <option value={opt.value}>{opt.label}</option>
-          {/each}
-        </select>
+        {/if}
+        <span class="spacer"></span>
         <button class="x" title="Remove" onclick={() => remove(i)}>×</button>
       </div>
-      {#if fadeable}
-        <label class="check">
-          <input
-            type="checkbox"
-            checked={trig.fade ?? false}
-            onchange={(e) => setFade(trig, e.currentTarget.checked)}
-          /> Fade
-        </label>
-      {/if}
       <CuePicker target={trig.target} />
+      {#if targetCue}
+        <div class="line">
+          <select bind:value={trig.action} onchange={() => app.markDirty()}>
+            {#each actions as opt (opt.value)}
+              <option value={opt.value}>{opt.label}</option>
+            {/each}
+          </select>
+          {#if fadeable}
+            <label class="check">
+              <input
+                type="checkbox"
+                checked={trig.fade ?? true}
+                onchange={(e) => setFade(trig, e.currentTarget.checked)}
+              /> Fade
+            </label>
+          {/if}
+        </div>
+      {/if}
     </div>
   {/each}
 
@@ -161,12 +190,40 @@
     flex: 1;
     min-width: 0;
   }
+  .events {
+    gap: 4px;
+  }
+  .spacer {
+    flex: 1;
+  }
+  .evt {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .evt:hover {
+    color: var(--text);
+    border-color: var(--muted);
+  }
+  .evt.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: white;
+  }
   .check {
     display: flex;
     align-items: center;
     gap: 6px;
     color: var(--text);
     font-size: 13px;
+    white-space: nowrap;
   }
   .x {
     border: none;

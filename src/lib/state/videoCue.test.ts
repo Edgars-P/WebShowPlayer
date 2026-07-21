@@ -260,7 +260,7 @@ describe('video cues', () => {
   describe('when the clip plays out', () => {
     it('frees the screen and fires the cue’s onEnd triggers', async () => {
       const v = cueIn(docA(), 'v-play') as unknown as { triggers: unknown[] };
-      v.triggers = [{ event: 'onEnd', target: { cueId: 'a-a' }, action: 'start' }];
+      v.triggers = [{ events: ['onEnd'], target: { cueId: 'a-a' }, action: 'start' }];
 
       await fire(docA(), 'v-play');
       bridge().videoEnded(app.video.generation);
@@ -273,7 +273,7 @@ describe('video cues', () => {
 
     it('ignores a report for a clip that has already been replaced', async () => {
       const v = cueIn(docA(), 'v-play') as unknown as { triggers: unknown[] };
-      v.triggers = [{ event: 'onEnd', target: { cueId: 'a-a' }, action: 'start' }];
+      v.triggers = [{ events: ['onEnd'], target: { cueId: 'a-a' }, action: 'start' }];
 
       await fire(docA(), 'v-play');
       const stale = app.video.generation;
@@ -292,8 +292,8 @@ describe('video cues', () => {
     it('fires the onEnd chain of whichever document last claimed the slot', async () => {
       const a = cueIn(docA(), 'v-play') as unknown as { triggers: unknown[] };
       const b = cueIn(docB(), 'v-b-play') as unknown as { triggers: unknown[] };
-      a.triggers = [{ event: 'onEnd', target: { cueId: 'a-a' }, action: 'start' }];
-      b.triggers = [{ event: 'onEnd', target: { cueId: 'b-a' }, action: 'start' }];
+      a.triggers = [{ events: ['onEnd'], target: { cueId: 'a-a' }, action: 'start' }];
+      b.triggers = [{ events: ['onEnd'], target: { cueId: 'b-a' }, action: 'start' }];
 
       await fire(docA(), 'v-play');
       await fire(docB(), 'v-b-play'); // B takes the screen, and the claim with it
@@ -392,7 +392,7 @@ describe('video cues', () => {
 
     it('does not fire the clip’s onEnd chain: it was cut off, not finished', async () => {
       const v = cueIn(docA(), 'v-play') as unknown as { triggers: unknown[] };
-      v.triggers = [{ event: 'onEnd', target: { cueId: 'a-a' }, action: 'start' }];
+      v.triggers = [{ events: ['onEnd'], target: { cueId: 'a-a' }, action: 'start' }];
 
       await fire(docA(), 'v-play');
       bridge().screenClosing();
@@ -453,7 +453,7 @@ describe('video cues', () => {
 
     it('does not fire its triggers either', async () => {
       const v = cueIn(docA(), 'v-play') as unknown as { triggers: unknown[] };
-      v.triggers = [{ event: 'onStart', target: { cueId: 'a-a' }, action: 'start' }];
+      v.triggers = [{ events: ['onStart'], target: { cueId: 'a-a' }, action: 'start' }];
 
       await withoutScreen(async () => {
         await fire(docA(), 'v-play');
@@ -491,7 +491,7 @@ describe('video cues', () => {
     // The clip opens asynchronously; a chain that rolls music under the video
     // must not stall on disk waiting for it.
     const v = cueIn(docA(), 'v-play') as unknown as { triggers: unknown[] };
-    v.triggers = [{ event: 'onStart', target: { cueId: 'a-a' }, action: 'start' }];
+    v.triggers = [{ events: ['onStart'], target: { cueId: 'a-a' }, action: 'start' }];
 
     docA().activate(cueIn(docA(), 'v-play')); // deliberately not awaited
 

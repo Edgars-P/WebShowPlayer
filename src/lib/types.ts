@@ -11,7 +11,13 @@ export type TriggerEvent = 'onStart' | 'onPause' | 'onStop' | 'onEnd';
 export type TriggerAction = 'click' | 'start' | 'pause' | 'resume' | 'stop' | 'set' | 'clear';
 
 export interface Trigger {
-  event: TriggerEvent;
+  /**
+   * Which of the source cue's lifecycle events fire this trigger. More than
+   * one may be set — e.g. the same action can run on both "stop" and the cue
+   * ending on its own — since both still mean "this cue is done." Always at
+   * least one; a trigger with none would do nothing and isn't kept around.
+   */
+  events: TriggerEvent[];
   target: CueRef;
   action: TriggerAction;
   /** Use the target's configured fade for start/pause/resume/stop. Ignored for

@@ -240,7 +240,7 @@ describe('global cues', () => {
   it('fires its own onStart triggers when run', () => {
     // Chain: the global stop cue also starts a specific cue afterwards.
     const g = cueIn(docA(), 'g-stop') as unknown as { triggers: unknown[] };
-    g.triggers = [{ event: 'onStart', target: { cueId: 'a-c' }, action: 'start' }];
+    g.triggers = [{ events: ['onStart'], target: { cueId: 'a-c' }, action: 'start' }];
 
     startEverything();
     docA().activate(cueIn(docA(), 'g-stop'));
@@ -257,7 +257,7 @@ describe('global cues', () => {
     // ducks the whole show and the jingle itself plays over the top.
     it('exempts a jingle whose onStart clicks stop-all', () => {
       const jingle = cueIn(docA(), 'a-a') as unknown as { triggers: unknown[] };
-      jingle.triggers = [{ event: 'onStart', target: { cueId: 'g-stop' }, action: 'click' }];
+      jingle.triggers = [{ events: ['onStart'], target: { cueId: 'g-stop' }, action: 'click' }];
 
       // The show is playing and the jingle is idle, ready to be fired.
       startEverything(['a-a']);
@@ -275,8 +275,8 @@ describe('global cues', () => {
     it('exempts it when the jingle is started by another trigger, not a click', () => {
       const jingle = cueIn(docA(), 'a-a') as unknown as { triggers: unknown[] };
       const opener = cueIn(docA(), 'a-b') as unknown as { triggers: unknown[] };
-      jingle.triggers = [{ event: 'onStart', target: { cueId: 'g-stop' }, action: 'click' }];
-      opener.triggers = [{ event: 'onStart', target: { cueId: 'a-a' }, action: 'start' }];
+      jingle.triggers = [{ events: ['onStart'], target: { cueId: 'g-stop' }, action: 'click' }];
+      opener.triggers = [{ events: ['onStart'], target: { cueId: 'a-a' }, action: 'start' }];
 
       startEverything(['a-a', 'a-b']);
       docA().activate(cueIn(docA(), 'a-b')); // a-b starts a-a, which stops all
@@ -294,7 +294,7 @@ describe('global cues', () => {
     it('exempts it across documents when the global cue is scoped to all', () => {
       const jingle = cueIn(docA(), 'a-a') as unknown as { triggers: unknown[] };
       jingle.triggers = [
-        { event: 'onStart', target: { cueId: 'g-stop-all-docs' }, action: 'click' },
+        { events: ['onStart'], target: { cueId: 'g-stop-all-docs' }, action: 'click' },
       ];
 
       startEverything(['a-a']);
@@ -310,7 +310,7 @@ describe('global cues', () => {
     it('still stops the jingle when stop-all is fired independently afterwards', () => {
       // The exemption is per-chain, not a permanent immunity.
       const jingle = cueIn(docA(), 'a-a') as unknown as { triggers: unknown[] };
-      jingle.triggers = [{ event: 'onStart', target: { cueId: 'g-stop' }, action: 'click' }];
+      jingle.triggers = [{ events: ['onStart'], target: { cueId: 'g-stop' }, action: 'click' }];
 
       startEverything(['a-a']);
       docA().activate(cueIn(docA(), 'a-a'));
@@ -334,7 +334,7 @@ describe('global cues', () => {
     // a-a's onStop runs the stop-all cue, whose action stops a-a again...
     // The re-entrancy guard must break this, not recurse forever.
     const a = cueIn(docA(), 'a-a') as unknown as { triggers: unknown[] };
-    a.triggers = [{ event: 'onStop', target: { cueId: 'g-stop' }, action: 'click' }];
+    a.triggers = [{ events: ['onStop'], target: { cueId: 'g-stop' }, action: 'click' }];
 
     startEverything();
     expect(() => docA().activate(cueIn(docA(), 'g-stop'))).not.toThrow();
@@ -346,8 +346,8 @@ describe('global cues', () => {
   it('two global cues pointing at each other terminate', () => {
     const g1 = cueIn(docA(), 'g-stop') as unknown as { triggers: unknown[] };
     const g2 = cueIn(docA(), 'g-pause') as unknown as { triggers: unknown[] };
-    g1.triggers = [{ event: 'onStart', target: { cueId: 'g-pause' }, action: 'click' }];
-    g2.triggers = [{ event: 'onStart', target: { cueId: 'g-stop' }, action: 'click' }];
+    g1.triggers = [{ events: ['onStart'], target: { cueId: 'g-pause' }, action: 'click' }];
+    g2.triggers = [{ events: ['onStart'], target: { cueId: 'g-stop' }, action: 'click' }];
 
     startEverything();
     expect(() => docA().activate(cueIn(docA(), 'g-stop'))).not.toThrow();

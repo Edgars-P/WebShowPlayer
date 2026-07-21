@@ -33,7 +33,7 @@ const project = () => ({
       id: 'one',
       name: 'One',
       cues: [
-        audioCue('a', 0, 0, [{ event: 'onStart', target: { cueId: 'b' }, action: 'start' }]),
+        audioCue('a', 0, 0, [{ events: ['onStart'], target: { cueId: 'b' }, action: 'start' }]),
         audioCue('b', 1, 1),
       ],
     },

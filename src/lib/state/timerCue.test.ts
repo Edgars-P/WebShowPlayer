@@ -207,7 +207,7 @@ describe('timer cues', () => {
 
     it('run to the end, it finishes the way it would have on its own', () => {
       const t = cueIn(docA(), 't-set-short') as unknown as { triggers: unknown[] };
-      t.triggers = [{ event: 'onStop', target: { cueId: 'a-a' }, action: 'start' }];
+      t.triggers = [{ events: ['onStop'], target: { cueId: 'a-a' }, action: 'start' }];
 
       fire(docA(), 't-set-short');
       app.seekTimer(1);

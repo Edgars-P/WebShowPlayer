@@ -26,7 +26,6 @@ import {
   type Tab,
   type TimerAction,
   type TimerCue,
-  type Trigger,
   type TriggerAction,
   type TriggerEvent,
   type VideoAction,
@@ -451,16 +450,14 @@ export class Doc {
     for (const trig of subject.triggers) {
       const target = this.resolveRef(trig.target);
       if (!target) continue;
-      const hint: TriggerHint = {
-        event: trig.event,
-        action: trig.action,
-        now: trig.event === imminent,
-      };
-      add(target.id, hint);
       // A proxy target controls something else — mark that tile too, so the
       // chain is visible end to end.
       const effective = this.resolveProxy(target);
-      if (effective && effective.id !== target.id) add(effective.id, hint);
+      for (const event of trig.events) {
+        const hint: TriggerHint = { event, action: trig.action, now: event === imminent };
+        add(target.id, hint);
+        if (effective && effective.id !== target.id) add(effective.id, hint);
+      }
     }
 
     // Imminent first, so the blue badge leads on tiles driven by both.
@@ -695,11 +692,11 @@ export class Doc {
     this.fireTriggers(cue.id, 'onStart');
   }
 
-  private fireTriggers(cueId: string, event: Trigger['event']): void {
+  private fireTriggers(cueId: string, event: TriggerEvent): void {
     const cue = this.findCue(cueId);
     if (!cue) return;
     for (const trig of cue.triggers) {
-      if (trig.event !== event) continue;
+      if (!trig.events.includes(event)) continue;
       const target = this.resolveRef(trig.target);
       if (!target) continue;
       const effective = this.resolveProxy(target);

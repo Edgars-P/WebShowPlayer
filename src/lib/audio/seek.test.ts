@@ -133,9 +133,9 @@ describe('seeking', () => {
     // is onStart, so firing c1 leaves c2 idle and any later change is the seek.
     const c1 = play({
       triggers: [
-        { event: 'onStop', target: { cueId: 'c2' }, action: 'start' },
-        { event: 'onPause', target: { cueId: 'c2' }, action: 'start' },
-        { event: 'onEnd', target: { cueId: 'c2' }, action: 'start' },
+        { events: ['onStop'], target: { cueId: 'c2' }, action: 'start' },
+        { events: ['onPause'], target: { cueId: 'c2' }, action: 'start' },
+        { events: ['onEnd'], target: { cueId: 'c2' }, action: 'start' },
       ],
     });
     expect(state('c2')).toBe('idle');

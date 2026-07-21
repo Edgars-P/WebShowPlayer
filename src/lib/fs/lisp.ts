@@ -127,7 +127,7 @@ function convertTriggers(lc: Record<string, unknown>, idMap: Map<string, string>
       const cueId = idMap.get(String(pair[0]));
       if (!cueId) continue;
       out.push({
-        event,
+        events: [event],
         action: mapAction(String(pair[1])),
         target: { cueId },
       });
