@@ -1,0 +1,20 @@
+{
+  // Single Worker serving the built static site (dist/) and terminating the
+  // remote-control WebSocket at /api/remote/<roomId>, which it routes to the
+  // per-room RemoteRoom Durable Object. See worker/index.ts.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "webshowplayer",
+  "main": "worker/index.ts",
+  "compatibility_date": "2025-07-01",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS"
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "REMOTE_ROOM", "class_name": "RemoteRoom" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RemoteRoom"] }]
+  // HOST_KEY is a secret, provisioned out-of-band:
+  //   production:  wrangler secret put HOST_KEY
+  //   local dev:   put HOST_KEY=... in .dev.vars (git-ignored)
+}

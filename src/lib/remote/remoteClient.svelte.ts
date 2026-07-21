@@ -1,20 +1,20 @@
 // The phone side of the remote: reads the pairing info out of the page's hash
-// fragment, joins the same trystero room as the host, holds the latest state
-// snapshot for the UI to render, and sends whitelisted commands back.
+// fragment, opens a WebSocket to the same site's Cloudflare Worker (which routes
+// it to the room's Durable Object), holds the latest state snapshot for the UI
+// to render, and sends whitelisted commands back.
 //
 // Runs on remote.html, a separate Vite entry — a different device from the
-// player, which is the whole reason a WebRTC channel is needed rather than the
+// player, which is why the messages go through the Worker + DO rather than the
 // same-origin window bridge the projector screen uses.
 
-import { getRelaySockets, joinRoom, type DataPayload, type Room } from 'trystero/nostr';
 import {
   parsePairHash,
-  REMOTE_APP_ID,
+  type ControllerFrame,
+  type ControllerInbound,
   type RemoteCommand,
   type RemoteSnapshot,
 } from './protocol';
 import { rlog } from './log';
-import type { IceServer } from './turn';
 
 export type ClientStatus = 'connecting' | 'connected' | 'reconnecting' | 'error';
 
@@ -36,18 +36,15 @@ export class RemoteClient {
   stale = $state(false);
   error = $state('');
 
-  private room: Room | null = null;
-  private sendCmd: ((cmd: RemoteCommand) => Promise<void>) | null = null;
+  private socket: WebSocket | null = null;
   private roomId = '';
-  private secret = '';
-  /** TURN ICE servers the QR carried, or [] for direct P2P + STUN only. */
-  private iceServers: IceServer[] = [];
+  private key = '';
   private reconnectTimer = 0;
   private staleTimer = 0;
   private lastSnapshotAt = 0;
   private started = false;
-  /** True once we've joined at least once — so the first connect skips healing. */
-  private hasJoined = false;
+  /** Bumps every (re)connect so a superseded socket's late events are ignored. */
+  private epoch = 0;
 
   /** Read the fragment and connect. Fails loudly if the link has no pairing code. */
   start(): void {
@@ -60,9 +57,8 @@ export class RemoteClient {
       return;
     }
     this.roomId = pair.roomId;
-    this.secret = pair.secret;
-    this.iceServers = pair.iceServers ?? [];
-    rlog('client', 'start; turn servers from QR:', this.iceServers.length);
+    this.key = pair.key;
+    rlog('client', 'start; room', this.roomId);
     this.connect();
 
     // A phone's connection comes and goes as it moves around a venue; rejoin as
@@ -80,92 +76,69 @@ export class RemoteClient {
     }, 1000) as unknown as number;
   }
 
+  private socketUrl(): string {
+    const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const room = encodeURIComponent(this.roomId);
+    const key = encodeURIComponent(this.key);
+    return `${scheme}//${location.host}/api/remote/${room}?role=controller&key=${key}`;
+  }
+
   private connect(): void {
-    this.teardownRoom();
-    // On a *reconnect*, force the signaling relays to re-establish first. As on
-    // the host, trystero caches relay sockets at module scope, so one that went
-    // dead while we were away (a network change — a VPN toggling is the usual
-    // culprit) would otherwise be reused and keep us from ever finding the host.
-    // Skipped on the very first attempt, when the sockets are fresh anyway.
-    if (this.hasJoined) this.refreshSignaling();
+    this.teardownSocket();
     // Keep whatever we last showed on screen while we reconnect, so the operator
     // isn't left staring at a blank remote mid-show.
     this.status = this.snapshot ? 'reconnecting' : 'connecting';
+    const epoch = ++this.epoch;
+    const isCurrent = () => epoch === this.epoch;
     try {
-      const room = joinRoom(
-        { appId: REMOTE_APP_ID, password: this.secret, turnConfig: this.iceServers as RTCIceServer[] },
-        this.roomId,
-      );
-      this.room = room;
-      this.hasJoined = true;
-      rlog('client', 'joined room; turn servers:', this.iceServers.length);
+      const socket = new WebSocket(this.socketUrl());
+      this.socket = socket;
+      rlog('client', 'connecting');
 
-      // A superseded room can still fire callbacks after we've moved on: its
-      // `leave()` is async (it lingers ~100ms destroying peers), and an old
-      // peer's connection may close or error at any point after we've replaced
-      // it — which happens whenever a phone browser is backgrounded and
-      // reopened. Those stale callbacks must not touch the live state, or the
-      // dead room's onPeerLeave flips us back to 'reconnecting' and schedules a
-      // reconnect that tears down the fresh, working room — a loop that
-      // "connects for a split second, then drops" forever. Gate every handler
-      // on this room still being the current one.
-      const isCurrent = () => room === this.room;
-
-      // The payloads are plain JSON; trystero's DataPayload constraint wants an
-      // index signature our named types don't carry, so cast at the boundary.
-      const state = room.makeAction('state');
-      state.onMessage = (data) => {
-        if (!isCurrent()) return;
-        this.snapshot = data as unknown as RemoteSnapshot;
-        this.status = 'connected';
-        this.lastSnapshotAt = Date.now();
-        this.stale = false;
-      };
-
-      const cmd = room.makeAction('cmd');
-      this.sendCmd = (c) => cmd.send(c as unknown as DataPayload);
-
-      room.onPeerJoin = () => {
+      socket.onopen = () => {
         if (!isCurrent()) return;
         this.status = 'connected';
-        rlog('client', 'peer join');
+        rlog('client', 'socket open');
       };
-      room.onPeerLeave = () => {
+
+      socket.onmessage = (ev) => {
         if (!isCurrent()) return;
-        if (Object.keys(room.getPeers()).length === 0) {
-          this.status = 'reconnecting';
-          rlog('client', 'peer leave; reconnecting');
-          this.scheduleReconnect();
-        }
+        this.onMessage(ev.data);
+      };
+
+      socket.onclose = () => {
+        if (!isCurrent()) return;
+        rlog('client', 'socket closed; reconnecting');
+        this.socket = null;
+        this.status = 'reconnecting';
+        this.scheduleReconnect();
+      };
+
+      socket.onerror = () => {
+        if (!isCurrent()) return;
+        rlog('client', 'socket error');
+        // onclose follows an error and drives the reconnect; nothing to do here.
       };
     } catch (err) {
       this.status = 'error';
       this.error = err instanceof Error ? err.message : String(err);
-      rlog('client', 'join failed:', this.error);
+      rlog('client', 'connect failed:', this.error);
       this.scheduleReconnect();
     }
   }
 
-  /**
-   * Force the signaling relays to reconnect — the phone-side twin of the host's
-   * method. trystero reuses module-cached relay sockets across rejoins, so one
-   * that died on a network change must be closed to be re-established. Relays
-   * carry only connection setup, never live session data, so this is safe.
-   */
-  private refreshSignaling(): void {
-    let sockets: Record<string, WebSocket> = {};
+  private onMessage(raw: unknown): void {
+    let msg: ControllerInbound;
     try {
-      sockets = getRelaySockets() as Record<string, WebSocket>;
+      msg = JSON.parse(typeof raw === 'string' ? raw : '') as ControllerInbound;
     } catch {
       return;
     }
-    rlog('client', 'refreshSignaling;', Object.keys(sockets).length, 'relays');
-    for (const socket of Object.values(sockets)) {
-      try {
-        socket.close();
-      } catch {
-        // Already closing — nothing to do.
-      }
+    if (msg.k === 'state') {
+      this.snapshot = msg.d as RemoteSnapshot;
+      this.status = 'connected';
+      this.lastSnapshotAt = Date.now();
+      this.stale = false;
     }
   }
 
@@ -177,16 +150,28 @@ export class RemoteClient {
     }, RECONNECT_MS) as unknown as number;
   }
 
-  /** Fire a command at the host. No-op until a channel is up. */
+  /** Fire a command at the host. No-op until the socket is open. */
   send(cmd: RemoteCommand): void {
-    if (this.sendCmd) void this.sendCmd(cmd);
+    if (this.socket?.readyState !== WebSocket.OPEN) return;
+    const frame: ControllerFrame = { k: 'cmd', d: cmd };
+    try {
+      this.socket.send(JSON.stringify(frame));
+    } catch {
+      // A failing send means the socket is closing; the reconnect path handles it.
+    }
   }
 
-  private teardownRoom(): void {
-    const room = this.room;
-    this.room = null;
-    this.sendCmd = null;
-    if (room) void room.leave();
+  private teardownSocket(): void {
+    this.epoch++; // Orphan the current socket's callbacks.
+    const socket = this.socket;
+    this.socket = null;
+    if (socket) {
+      try {
+        socket.close();
+      } catch {
+        // Already closing — nothing to do.
+      }
+    }
   }
 }
 

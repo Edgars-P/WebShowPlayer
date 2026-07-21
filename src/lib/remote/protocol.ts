@@ -4,26 +4,19 @@
 // the logic is unit-testable in the `node` vitest environment, exactly like
 // `timer.ts` and `cueFill.ts`.
 //
-// Security note: there is no cipher here. The channel these messages travel over
-// is a WebRTC data channel, which is DTLS-encrypted and authenticated between
-// the two browsers, and trystero's room `password` (the pairing secret) gates
-// who may join the room at all. A second application-layer cipher would be
-// redundant with DTLS, so we don't add one. What this module *does* enforce is
-// the command whitelist: the host only ever acts on a message that parses into
-// one of the fixed `RemoteCommand` shapes below.
+// Security note: there is no cipher here. These messages travel over a `wss`
+// WebSocket to our Cloudflare Worker, which is TLS-encrypted end to end, and the
+// Worker authenticates both ends before relaying a byte (the host with the
+// shared `hostKey`, the phone with the derived controller key in the QR — see
+// `derive.ts`). A second application-layer cipher would be redundant with TLS,
+// so we don't add one. What this module *does* enforce is the command whitelist:
+// the host only ever acts on a message that parses into one of the fixed
+// `RemoteCommand` shapes below.
 
 import type { PlaybackState } from '../types';
-import { decodeIceServers, encodeIceServers, type IceServer } from './turn';
 
 /** Bumped only if the wire shape changes incompatibly. */
 export const REMOTE_PROTOCOL = 1;
-
-/**
- * trystero application namespace. Not a secret — it only scopes our rooms apart
- * from every other trystero app on the same relays. The pairing secret is what
- * actually protects a room.
- */
-export const REMOTE_APP_ID = 'show-player-remote-v1';
 
 // ---- State the phone renders (host → phone) -------------------------------
 
@@ -130,6 +123,22 @@ export function buildSnapshot(input: SnapshotInput): RemoteSnapshot {
     master: input.master,
   };
 }
+
+// ---- Transport envelope (player ⇄ Durable Object ⇄ phone) -----------------
+
+// Every WebSocket frame is one JSON object tagged by `k`. The DO relays the
+// host's `state` to controllers and a controller's `cmd` to the host verbatim,
+// and injects its own `peers` count toward hosts. Received `d` is untrusted and
+// re-validated on arrival (commands through `parseCommand`).
+
+/** Sent by the player. `state` is relayed to every controller. */
+export type HostFrame = { k: 'state'; d: RemoteSnapshot };
+/** Sent by a phone. `cmd` is relayed to the host. */
+export type ControllerFrame = { k: 'cmd'; d: RemoteCommand };
+/** What the player receives: a relayed command, or the DO's device count. */
+export type HostInbound = { k: 'cmd'; d: unknown } | { k: 'peers'; n: number };
+/** What a phone receives: a relayed state snapshot. */
+export type ControllerInbound = { k: 'state'; d: unknown };
 
 // ---- Commands the phone may send (phone → host) ---------------------------
 
@@ -259,13 +268,13 @@ export function applyCommand(host: RemoteHostActions, raw: unknown): boolean {
   return true;
 }
 
-// ---- Pairing secret + URL -------------------------------------------------
+// ---- Pairing (room + controller key) --------------------------------------
 
 /**
- * A URL-safe random string of `bytes` bytes (default 32 → 256 bits). Used as
- * the trystero room password (the pairing secret) and, at a shorter length, as
- * the room id. `getRandomValues` is a CSPRNG and needs no secure context, so
- * this works the same in the app, on the phone, and under vitest.
+ * A URL-safe random string of `bytes` bytes (default 32 → 256 bits).
+ * `getRandomValues` is a CSPRNG and needs no secure context, so this works the
+ * same in the app, on the phone, and under vitest. Used to suggest a strong
+ * `hostKey` for the operator to paste into both the player and the Worker.
  */
 export function randomSecret(bytes = 32): string {
   const buf = new Uint8Array(bytes);
@@ -275,38 +284,32 @@ export function randomSecret(bytes = 32): string {
   return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-/** The room + secret a phone needs, read out of a pairing URL's hash fragment. */
+/**
+ * What a phone needs to connect, read out of a pairing URL's hash fragment: the
+ * room to join and the derived controller key that authenticates it. Neither is
+ * the shared `hostKey` — the phone never receives that.
+ */
 export interface PairInfo {
   roomId: string;
-  secret: string;
-  /**
-   * TURN ICE servers the player minted and shipped in the QR, if any. Optional:
-   * an old QR, or a player with no TURN key, simply omits them and the phone
-   * falls back to direct P2P + STUN.
-   */
-  iceServers?: IceServer[];
+  key: string;
 }
 
 /**
- * Read the pairing info out of a URL hash fragment
- * (`#r=<room>&k=<secret>[&t=<ice>]`), or null if the room or secret is missing.
- * The secret lives in the *fragment* on purpose: fragments are never sent to a
- * server, so scanning the QR never leaks it — and the same is true of the TURN
- * credentials that ride alongside it.
+ * Read the pairing info out of a URL hash fragment (`#room=<id>&key=<derived>`),
+ * or null if either part is missing. It lives in the *fragment* so the values
+ * aren't sent to the static-asset server on page load; the phone's JS reads them
+ * and opens the authenticated WebSocket itself.
  */
 export function parsePairHash(hash: string): PairInfo | null {
   const body = hash.startsWith('#') ? hash.slice(1) : hash;
   const params = new URLSearchParams(body);
-  const roomId = params.get('r');
-  const secret = params.get('k');
-  if (!roomId || !secret) return null;
-  const t = params.get('t');
-  const iceServers = t ? decodeIceServers(t) : null;
-  return iceServers && iceServers.length ? { roomId, secret, iceServers } : { roomId, secret };
+  const roomId = params.get('room');
+  const key = params.get('key');
+  if (!roomId || !key) return null;
+  return { roomId, key };
 }
 
 /** Build the pairing URL a QR encodes, from an origin and the pair info. */
 export function pairUrl(origin: string, pair: PairInfo): string {
-  const base = `${origin}/remote.html#r=${encodeURIComponent(pair.roomId)}&k=${encodeURIComponent(pair.secret)}`;
-  return pair.iceServers && pair.iceServers.length ? `${base}&t=${encodeIceServers(pair.iceServers)}` : base;
+  return `${origin}/remote.html#room=${encodeURIComponent(pair.roomId)}&key=${encodeURIComponent(pair.key)}`;
 }

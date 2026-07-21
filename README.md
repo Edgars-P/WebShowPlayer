@@ -1,4 +1,36 @@
-# Svelte + TS + Vite
+# Web Show Player
+
+## Deployment (Cloudflare Worker + Static Assets)
+
+The site is served by a single Cloudflare Worker (`worker/index.ts`): it serves the
+built static app from `dist/` and terminates the phone-remote WebSocket at
+`/api/remote/<roomId>`, routing it to a per-room `RemoteRoom` Durable Object that relays
+messages between the player and its phones. Config is in `wrangler.jsonc`.
+
+```sh
+pnpm build            # vite build → dist/
+pnpm deploy           # vite build && wrangler deploy
+pnpm cf:dev           # vite build && wrangler dev (serves assets + worker locally)
+```
+
+`pnpm dev` (plain Vite) is fine for UI work but does **not** serve `/api/*`, so the phone
+remote only works under `wrangler dev` or a real deploy.
+
+### Phone remote setup (the `HOST_KEY` secret)
+
+The remote authenticates the player with a shared secret, `HOST_KEY`, held in two places:
+
+1. **The Worker** — `wrangler secret put HOST_KEY` (production) or a git-ignored
+   `.dev.vars` with `HOST_KEY=…` (for `wrangler dev`; see `.dev.vars.example`).
+2. **The player** — paste the *same* value into the remote panel's "Host key" field
+   (there's a "Generate" button to mint a strong one). It's stored in `localStorage`.
+
+The phone never receives `HOST_KEY`. When the operator turns the remote on, the player
+puts a room id + a derived key — `SHA-256(HOST_KEY + ":" + roomId)` — in the QR; the
+Worker re-derives and validates it. "Regenerate code" mints a new room id, invalidating
+every previously scanned QR.
+
+## Svelte + TS + Vite
 
 This template should help get you started developing with Svelte and TypeScript in Vite.
 

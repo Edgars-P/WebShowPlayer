@@ -1,29 +1,31 @@
-// The host side of the phone remote: it lives inside the main player, joins a
-// trystero room when the operator switches the remote on, mirrors the player's
-// live state to any connected phones, and applies the commands they send back.
+// The host side of the phone remote: it lives inside the main player, opens a
+// WebSocket to this site's own Cloudflare Worker when the operator switches the
+// remote on, mirrors the player's live state to any connected phones through the
+// per-room Durable Object, and applies the commands they send back.
 //
 // Modelled on `trello.svelte.ts` (a persisted-settings runes singleton) and on
 // the screen bridge in `screen/screen.ts` (a push/subscribe channel to another
-// context). trystero replaces `window.opener` as the transport, because the
-// phone is a different device.
+// context). The Worker + DO replace `window.opener` as the transport, because
+// the phone is a different device — and they replace the old WebRTC/trystero
+// path, which was too unreliable in the field.
 //
-// Off by default, and off every time the app starts: nothing here contacts a
-// relay until `enable()` is called from the toolbar. Only the pairing identity
-// (secret + room id) is persisted, so the same QR can be reused across sessions
-// — the *connection* is always an explicit, per-session choice.
+// Off by default, and off every time the app starts: nothing here contacts the
+// Worker until `enable()` is called from the toolbar. Only the pairing identity
+// (the shared `hostKey` and the room id) is persisted, so the same QR can be
+// reused across sessions — the *connection* is always an explicit, per-session
+// choice.
 
-import { getRelaySockets, joinRoom, type DataPayload, type Room } from 'trystero/nostr';
 import { app } from '../state/project.svelte';
 import {
   applyCommand,
   pairUrl as buildPairUrl,
-  randomSecret,
-  REMOTE_APP_ID,
+  type HostFrame,
+  type HostInbound,
   type RemoteHostActions,
   type RemoteSnapshot,
 } from './protocol';
+import { deriveControllerKey } from './derive';
 import { rlog } from './log';
-import { turn } from './turn.svelte';
 
 const STORAGE_KEY = 'showplayer.remote';
 
@@ -38,8 +40,13 @@ const PUSH_THROTTLE_MS = 200;
  */
 const HEARTBEAT_MS = 4000;
 
+/** How long to wait before reopening the socket after it drops. */
+const RECONNECT_MS = 2000;
+
 interface StoredPair {
-  secret: string;
+  /** Shared secret; also the Worker's HOST_KEY. Authenticates the host socket. */
+  hostKey: string;
+  /** Random per-player room id (a UUID); names the Durable Object. */
   roomId: string;
 }
 
@@ -48,8 +55,8 @@ function loadPair(): StoredPair | null {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<StoredPair>;
-    if (typeof parsed.secret === 'string' && typeof parsed.roomId === 'string' && parsed.secret && parsed.roomId) {
-      return { secret: parsed.secret, roomId: parsed.roomId };
+    if (typeof parsed.hostKey === 'string' && typeof parsed.roomId === 'string' && parsed.roomId) {
+      return { hostKey: parsed.hostKey, roomId: parsed.roomId };
     }
     return null;
   } catch {
@@ -58,14 +65,25 @@ function loadPair(): StoredPair | null {
   }
 }
 
+/** The `wss://…/api/remote/<room>` URL for this site's own origin. */
+function socketUrl(roomId: string, hostKey: string): string {
+  const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const room = encodeURIComponent(roomId);
+  const key = encodeURIComponent(hostKey);
+  return `${scheme}//${location.host}/api/remote/${room}?role=host&key=${key}`;
+}
+
 export type HostStatus = 'off' | 'waiting' | 'connected';
 
 export class RemoteHost {
   /** Whether the remote is switched on this session. Never persisted true. */
   enabled = $state(false);
-  /** The pairing secret (trystero password) and room — the QR encodes these. */
-  secret = $state('');
+  /** The shared host secret — also set as the Worker's HOST_KEY. */
+  hostKey = $state('');
+  /** The room id the DO is named by. The QR encodes this plus a derived key. */
   roomId = $state('');
+  /** SHA-256(hostKey:roomId), derived async; the phone's credential in the QR. */
+  controllerKey = $state('');
   /** Phones currently connected. */
   peerCount = $state(0);
   status = $state<HostStatus>('off');
@@ -73,15 +91,15 @@ export class RemoteHost {
   /** Whether the pairing panel (QR + status) is open. UI state, not persisted. */
   panelOpen = $state(false);
 
-  private room: Room | null = null;
-  private sendState: ((snapshot: RemoteSnapshot) => Promise<void>) | null = null;
+  private socket: WebSocket | null = null;
   private started = false;
   private lastSnapshot: RemoteSnapshot | null = null;
   private lastSentAt = 0;
   private flushTimer = 0;
   private heartbeatTimer = 0;
-  /** Timers for the post-drop signaling refresh burst (see startReconnectAssist). */
-  private assistTimers: number[] = [];
+  private reconnectTimer = 0;
+  /** Bumps every (re)connect so a superseded socket's late events are ignored. */
+  private epoch = 0;
 
   /**
    * The whitelist mapped onto `app`. Every one of these is an existing method —
@@ -110,36 +128,48 @@ export class RemoteHost {
     setMaster: (v) => app.setMasterVolume(v),
   };
 
-  /**
-   * The URL the QR encodes, or '' before a pairing identity exists. When a TURN
-   * key is configured, the freshly-minted ICE-server credentials ride along in
-   * the fragment, so the phone gets them from the QR without the API token ever
-   * leaving this machine. Reactive: the QR re-renders when `turn.iceServers`
-   * updates.
-   */
-  get pairUrl(): string {
-    if (!this.secret || !this.roomId) return '';
-    return buildPairUrl(location.origin, {
-      roomId: this.roomId,
-      secret: this.secret,
-      iceServers: turn.iceServers,
-    });
+  /** Whether a usable host key is configured — required to pair or connect. */
+  get configured(): boolean {
+    return !!this.hostKey.trim();
   }
 
   /**
-   * Load (or mint) the pairing identity. Deliberately does *not* connect —
-   * called once at app boot, it must leave the remote fully offline.
+   * The URL the QR encodes, or '' before the controller key has been derived.
+   * Reactive: the QR re-renders once `controllerKey` resolves and whenever the
+   * room id changes.
+   */
+  get pairUrl(): string {
+    if (!this.roomId || !this.controllerKey) return '';
+    return buildPairUrl(location.origin, { roomId: this.roomId, key: this.controllerKey });
+  }
+
+  /**
+   * Load the pairing identity. Deliberately does *not* connect — called once at
+   * app boot, it must leave the remote fully offline. A room id is minted on
+   * first use so the QR is stable; the host key is supplied by the operator.
    */
   start(): void {
     if (this.started) return;
     this.started = true;
     const pair = loadPair();
     if (pair) {
-      this.secret = pair.secret;
+      this.hostKey = pair.hostKey;
       this.roomId = pair.roomId;
-    } else {
-      this.mintPair();
     }
+    if (!this.roomId) this.roomId = crypto.randomUUID();
+    this.persist();
+    void this.refreshControllerKey();
+  }
+
+  /** Store a pasted host key, re-derive the QR, and reconnect if we were on. */
+  setHostKey(key: string): void {
+    const wasOn = this.enabled;
+    if (wasOn) this.disconnect();
+    this.hostKey = key.trim();
+    this.persist();
+    void this.refreshControllerKey();
+    if (wasOn && this.configured) this.connect();
+    else if (wasOn) this.enabled = false;
   }
 
   toggleEnabled(): void {
@@ -147,13 +177,14 @@ export class RemoteHost {
     else this.enable();
   }
 
-  /** Switch the remote on — the first point at which we contact any relay. */
+  /** Switch the remote on — the first point at which we contact the Worker. */
   enable(): void {
     if (this.enabled) return;
-    if (!this.secret || !this.roomId) this.mintPair();
+    if (!this.configured) {
+      this.lastError = 'Set a host key first.';
+      return;
+    }
     this.enabled = true;
-    // Mint TURN credentials (if a key is configured) so the QR carries them.
-    void turn.ensure();
     rlog('host', 'enable');
     this.connect();
   }
@@ -166,111 +197,123 @@ export class RemoteHost {
   }
 
   /**
-   * Mint a fresh secret and room, invalidating any QR already scanned: a phone
-   * paired on the old secret can no longer join. Reconnects under the new
-   * identity if the remote was on.
+   * Mint a fresh room id, invalidating any QR already scanned: a phone paired on
+   * the old room can no longer reach this player. Reconnects under the new room
+   * if the remote was on.
    */
   regenerate(): void {
     const wasOn = this.enabled;
     if (wasOn) this.disconnect();
-    this.mintPair();
+    this.roomId = crypto.randomUUID();
+    this.persist();
+    void this.refreshControllerKey();
     if (wasOn) this.connect();
   }
 
-  private mintPair(): void {
-    this.secret = randomSecret(32);
-    this.roomId = randomSecret(16);
-    this.persist();
+  /** Re-derive the phone's controller key from the current host key + room. */
+  private async refreshControllerKey(): Promise<void> {
+    if (!this.configured || !this.roomId) {
+      this.controllerKey = '';
+      return;
+    }
+    const key = this.roomId;
+    const derived = await deriveControllerKey(this.hostKey, this.roomId);
+    // Guard against a stale derivation landing after the room changed again.
+    if (key === this.roomId) this.controllerKey = derived;
   }
 
   private connect(): void {
-    if (this.room || !this.enabled) return;
+    if (this.socket || !this.enabled || !this.configured) return;
     this.status = 'waiting';
     this.lastError = '';
+    const epoch = ++this.epoch;
+    const isCurrent = () => epoch === this.epoch;
     try {
-      // turnConfig is trystero's list of extra ICE servers, appended to its
-      // built-in STUN. Empty when no TURN key is configured (direct P2P only).
-      const room = joinRoom(
-        { appId: REMOTE_APP_ID, password: this.secret, turnConfig: turn.iceServers as RTCIceServer[] },
-        this.roomId,
-      );
-      this.room = room;
-      rlog('host', 'joined room', this.roomId, 'turn servers:', turn.iceServers.length);
+      const socket = new WebSocket(socketUrl(this.roomId, this.hostKey));
+      this.socket = socket;
+      rlog('host', 'connecting room', this.roomId);
 
-      // A superseded room (after disconnect/regenerate) can still fire callbacks
-      // while its async `leave()` tears peers down, or when an old peer's
-      // connection closes later. Gate every handler on this being the current
-      // room so a dead room can't miscount peers or flip our status.
-      const isCurrent = () => room === this.room;
-
-      // trystero's payload type wants a JSON index signature our snapshot type
-      // doesn't carry; the value is plain JSON, so cast at the boundary.
-      const state = room.makeAction('state');
-      this.sendState = (snapshot) => state.send(snapshot as unknown as DataPayload);
-
-      const cmd = room.makeAction('cmd');
-      cmd.onMessage = (data) => {
+      socket.onopen = () => {
         if (!isCurrent()) return;
-        // Untrusted: parseCommand inside applyCommand is the gate.
-        applyCommand(this.actions, data);
+        rlog('host', 'socket open');
+        // Push the latest state at once so a phone that's already waiting gets
+        // caught up without waiting for the next change.
+        if (this.lastSnapshot) this.flush();
       };
 
-      room.onPeerJoin = () => {
+      socket.onmessage = (ev) => {
         if (!isCurrent()) return;
-        this.peerCount = Object.keys(room.getPeers()).length;
-        this.status = 'connected';
-        this.stopReconnectAssist();
-        rlog('host', 'peer join; peers:', this.peerCount);
-        // Catch the phone up on the current state at once, rather than waiting
-        // for the next change to push one.
-        if (this.lastSnapshot) void state.send(this.lastSnapshot as unknown as DataPayload);
-      };
-      room.onPeerLeave = () => {
-        if (!isCurrent()) return;
-        this.peerCount = Object.keys(room.getPeers()).length;
-        rlog('host', 'peer leave; peers:', this.peerCount);
-        if (this.peerCount === 0) {
-          this.status = 'waiting';
-          // A phone just dropped. It will try to come back — freshen signaling so
-          // it is actually seen (see startReconnectAssist).
-          this.startReconnectAssist();
-        }
+        this.onMessage(ev.data);
       };
 
-      this.heartbeatTimer = setInterval(() => {
-        if (this.peerCount > 0 && this.lastSnapshot) this.flush();
-      }, HEARTBEAT_MS) as unknown as number;
+      socket.onclose = () => {
+        if (!isCurrent()) return;
+        rlog('host', 'socket closed');
+        this.socket = null;
+        this.peerCount = 0;
+        this.status = 'waiting';
+        if (this.enabled) this.scheduleReconnect();
+      };
+
+      socket.onerror = () => {
+        if (!isCurrent()) return;
+        this.lastError = 'Connection error.';
+        rlog('host', 'socket error');
+      };
     } catch (err) {
       this.lastError = err instanceof Error ? err.message : String(err);
       this.status = 'off';
-      this.room = null;
-      this.sendState = null;
-      rlog('host', 'join failed:', this.lastError);
+      this.socket = null;
+      rlog('host', 'connect failed:', this.lastError);
+      if (this.enabled) this.scheduleReconnect();
     }
   }
 
-  /**
-   * Force the signaling relays to reconnect. trystero caches relay websockets at
-   * module scope and reuses them across every rejoin, so a socket that has
-   * quietly died — TCP gone, but `readyState` still "open", which public nostr
-   * relays do routinely — leaves the host deaf to a returning phone with no way
-   * to recover short of reloading the whole player. Closing the sockets makes
-   * trystero re-establish and re-subscribe them.
-   *
-   * Safe to call anytime, even with a phone connected: relays only carry
-   * connection *setup*, never a live session's data (that travels the direct
-   * WebRTC channel), so an active remote is undisturbed.
-   */
-  refreshSignaling(reason: string): void {
-    let sockets: Record<string, WebSocket> = {};
+  private onMessage(raw: unknown): void {
+    let msg: HostInbound;
     try {
-      sockets = getRelaySockets() as Record<string, WebSocket>;
+      msg = JSON.parse(typeof raw === 'string' ? raw : '') as HostInbound;
     } catch {
       return;
     }
-    const states = Object.entries(sockets).map(([url, s]) => `${url.replace(/^wss?:\/\//, '')}=${s.readyState}`);
-    rlog('host', `refreshSignaling (${reason}); ${states.length} relays:`, states.join(' ') || '(none yet)');
-    for (const socket of Object.values(sockets)) {
+    if (msg.k === 'peers') {
+      this.peerCount = msg.n;
+      this.status = msg.n > 0 ? 'connected' : 'waiting';
+      rlog('host', 'peers:', msg.n);
+      if (msg.n > 0 && this.lastSnapshot) this.flush();
+    } else if (msg.k === 'cmd') {
+      // Untrusted: parseCommand inside applyCommand is the gate.
+      applyCommand(this.actions, msg.d);
+    }
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = 0;
+      if (this.enabled) this.connect();
+    }, RECONNECT_MS) as unknown as number;
+  }
+
+  private disconnect(): void {
+    this.epoch++; // Orphan the current socket's callbacks.
+    this.peerCount = 0;
+    this.status = 'off';
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = 0;
+    }
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = 0;
+    }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = 0;
+    }
+    const socket = this.socket;
+    this.socket = null;
+    if (socket) {
       try {
         socket.close();
       } catch {
@@ -280,41 +323,24 @@ export class RemoteHost {
   }
 
   /**
-   * After a phone drops, refresh the signaling relays a few times over the next
-   * ~30s. This heals any relay socket that went dead while the phone was
-   * connected, so the phone's reconnect is discovered — the recovery that used
-   * to require reloading the player. Bounded (not a perpetual poll) to stay
-   * gentle on the public relays; cancelled the moment a peer reconnects.
+   * Force a reconnect without changing the pairing — the operator's "Reconnect"
+   * button. Cheap now that the transport is a single socket: close it and let
+   * the reconnect path bring a fresh one up.
    */
-  private startReconnectAssist(): void {
-    this.stopReconnectAssist();
-    const schedule = [0, 4000, 12000, 30000];
-    this.assistTimers = schedule.map(
-      (delay) => setTimeout(() => this.refreshSignaling('reconnect-assist'), delay) as unknown as number,
-    );
-  }
-
-  private stopReconnectAssist(): void {
-    this.assistTimers.forEach(clearTimeout);
-    this.assistTimers = [];
-  }
-
-  private disconnect(): void {
-    this.peerCount = 0;
-    this.status = 'off';
-    this.sendState = null;
-    this.stopReconnectAssist();
-    if (this.flushTimer) {
-      clearTimeout(this.flushTimer);
-      this.flushTimer = 0;
+  reconnect(): void {
+    if (!this.enabled) return;
+    rlog('host', 'manual reconnect');
+    this.epoch++;
+    const socket = this.socket;
+    this.socket = null;
+    if (socket) {
+      try {
+        socket.close();
+      } catch {
+        // Already closing.
+      }
     }
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = 0;
-    }
-    const room = this.room;
-    this.room = null;
-    if (room) void room.leave();
+    this.connect();
   }
 
   /**
@@ -325,7 +351,8 @@ export class RemoteHost {
    */
   pushState(snapshot: RemoteSnapshot): void {
     this.lastSnapshot = snapshot;
-    if (!this.sendState || this.peerCount === 0) return;
+    this.ensureHeartbeat();
+    if (this.peerCount === 0 || !this.isOpen()) return;
     const dt = Date.now() - this.lastSentAt;
     if (dt >= PUSH_THROTTLE_MS) {
       this.flush();
@@ -334,20 +361,35 @@ export class RemoteHost {
     }
   }
 
+  private ensureHeartbeat(): void {
+    if (this.heartbeatTimer) return;
+    this.heartbeatTimer = setInterval(() => {
+      if (this.peerCount > 0 && this.lastSnapshot && this.isOpen()) this.flush();
+    }, HEARTBEAT_MS) as unknown as number;
+  }
+
+  private isOpen(): boolean {
+    return this.socket?.readyState === WebSocket.OPEN;
+  }
+
   private flush(): void {
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = 0;
     }
+    if (!this.isOpen() || !this.lastSnapshot || this.peerCount === 0) return;
     this.lastSentAt = Date.now();
-    if (this.sendState && this.lastSnapshot && this.peerCount > 0) {
-      void this.sendState(this.lastSnapshot);
+    const frame: HostFrame = { k: 'state', d: this.lastSnapshot };
+    try {
+      this.socket!.send(JSON.stringify(frame));
+    } catch {
+      // A socket that fails the send is about to close; the reconnect path handles it.
     }
   }
 
   private persist(): void {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ secret: this.secret, roomId: this.roomId }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ hostKey: this.hostKey, roomId: this.roomId }));
     } catch {
       // Private-mode storage failures are not worth interrupting a show for.
     }

@@ -7,7 +7,7 @@
 
   import qrcode from 'qrcode-generator';
   import { remoteHost } from '../remote/remoteHost.svelte';
-  import { turn } from '../remote/turn.svelte';
+  import { randomSecret } from '../remote/protocol';
 
   /** Render a QR for `text` as a self-contained, scalable SVG string. */
   function qrSvg(text: string): string {
@@ -53,27 +53,28 @@
     remoteHost.regenerate();
   }
 
-  // --- TURN (Cloudflare) settings, configured like the Trello credentials. ---
-  let turnOpen = $state(false);
-  let keyId = $state('');
-  let apiToken = $state('');
+  // --- Host key: the shared secret this player and the Worker both hold. ---
+  let keyOpen = $state(false);
+  let hostKeyDraft = $state('');
 
-  function openTurn() {
-    keyId = turn.settings.keyId;
-    apiToken = turn.settings.apiToken;
-    turnOpen = true;
+  function openKey() {
+    hostKeyDraft = remoteHost.hostKey;
+    keyOpen = true;
   }
 
-  function saveTurn() {
-    turn.save({ keyId, apiToken });
-    turnOpen = false;
+  function saveKey() {
+    remoteHost.setHostKey(hostKeyDraft);
+    keyOpen = false;
   }
 
-  function clearTurn() {
-    turn.clear();
-    keyId = '';
-    apiToken = '';
-    turnOpen = false;
+  function generateKey() {
+    hostKeyDraft = randomSecret(32);
+  }
+
+  function clearKey() {
+    remoteHost.setHostKey('');
+    hostKeyDraft = '';
+    keyOpen = false;
   }
 </script>
 
@@ -93,13 +94,16 @@
         <button
           class="ghost toggle"
           class:on={remoteHost.enabled}
+          disabled={!remoteHost.configured}
           onclick={() => remoteHost.toggleEnabled()}
         >
           {remoteHost.enabled ? 'Turn off' : 'Turn on'}
         </button>
       </div>
 
-      {#if remoteHost.enabled}
+      {#if !remoteHost.configured}
+        <p class="hint off">Set a host key below before turning the remote on.</p>
+      {:else if remoteHost.enabled}
         <p class="hint">Scan with a phone camera to pair.</p>
         <div class="qr">
           <!-- Self-generated SVG from our own pairing URL; no external input. -->
@@ -112,8 +116,8 @@
         <div class="footer">
           <button
             class="ghost"
-            onclick={() => remoteHost.refreshSignaling('manual')}
-            title="Re-establish the signalling relays without reloading the player — use if a phone is stuck reconnecting"
+            onclick={() => remoteHost.reconnect()}
+            title="Reopen the connection — use if a phone is stuck reconnecting"
           >
             Reconnect
           </button>
@@ -129,34 +133,36 @@
         <p class="err">{remoteHost.lastError}</p>
       {/if}
 
-      <!-- TURN relay: optional, helps a phone reconnect across network changes. -->
+      <!-- Host key: the shared secret. Must match the Worker's HOST_KEY secret. -->
       <div class="turn">
-        {#if turnOpen}
+        {#if keyOpen}
           <label class="field">
-            <span>Cloudflare TURN key ID</span>
-            <input bind:value={keyId} placeholder="key id" autocomplete="off" spellcheck="false" />
-          </label>
-          <label class="field">
-            <span>API token</span>
-            <input bind:value={apiToken} type="password" placeholder="token" autocomplete="off" spellcheck="false" />
+            <span>Host key</span>
+            <input
+              bind:value={hostKeyDraft}
+              type="password"
+              placeholder="shared secret"
+              autocomplete="off"
+              spellcheck="false"
+            />
           </label>
           <p class="hint">
-            The player mints short-lived credentials and ships them to the phone in the QR — the token never leaves this
-            computer. The same credentials serve both sides.
+            Set the same value with <code>wrangler secret put HOST_KEY</code> on the Worker. It never leaves this computer
+            or the server — the phone only receives a key derived from it, in the QR.
           </p>
           <div class="turnbtns">
-            <button class="ghost" onclick={saveTurn}>Save</button>
-            <button class="ghost" onclick={() => (turnOpen = false)}>Cancel</button>
-            {#if turn.configured}
-              <button class="ghost danger" onclick={clearTurn}>Remove</button>
+            <button class="ghost" onclick={saveKey}>Save</button>
+            <button class="ghost" onclick={generateKey}>Generate</button>
+            <button class="ghost" onclick={() => (keyOpen = false)}>Cancel</button>
+            {#if remoteHost.configured}
+              <button class="ghost danger" onclick={clearKey}>Remove</button>
             {/if}
           </div>
-          {#if turn.error}<p class="err">TURN: {turn.error}</p>{/if}
         {:else}
-          <button class="ghost turnrow" onclick={openTurn}>
-            <span>TURN relay</span>
-            <span class="turnstate" class:on={turn.configured}>
-              {turn.configured ? (turn.iceServers.length ? 'Active' : turn.error ? 'Error' : 'Configured') : 'Off'}
+          <button class="ghost turnrow" onclick={openKey}>
+            <span>Host key</span>
+            <span class="turnstate" class:on={remoteHost.configured}>
+              {remoteHost.configured ? 'Set' : 'Not set'}
             </span>
           </button>
         {/if}

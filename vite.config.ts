@@ -15,7 +15,7 @@ export default defineConfig({
     },
   },
   test: {
-    include: ['src/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'worker/**/*.test.ts'],
     // The modules under test are plain logic over stubbed Web Audio and File
     // System Access globals, so they need no DOM. The svelte plugin above
     // compiles the runes in *.svelte.ts for us.

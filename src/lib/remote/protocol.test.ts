@@ -209,38 +209,22 @@ describe('randomSecret', () => {
 });
 
 describe('parsePairHash / pairUrl round-trip', () => {
-  it('reads r and k out of a fragment, with or without the leading #', () => {
-    expect(parsePairHash('#r=room1&k=sekret')).toEqual({ roomId: 'room1', secret: 'sekret' });
-    expect(parsePairHash('r=room1&k=sekret')).toEqual({ roomId: 'room1', secret: 'sekret' });
+  it('reads room and key out of a fragment, with or without the leading #', () => {
+    expect(parsePairHash('#room=room1&key=derived')).toEqual({ roomId: 'room1', key: 'derived' });
+    expect(parsePairHash('room=room1&key=derived')).toEqual({ roomId: 'room1', key: 'derived' });
   });
 
   it('returns null when either part is missing', () => {
     expect(parsePairHash('')).toBeNull();
-    expect(parsePairHash('#r=room1')).toBeNull();
-    expect(parsePairHash('#k=sekret')).toBeNull();
+    expect(parsePairHash('#room=room1')).toBeNull();
+    expect(parsePairHash('#key=derived')).toBeNull();
   });
 
   it('round-trips a minted pair through the URL and back', () => {
-    const pair = { roomId: randomSecret(16), secret: randomSecret(32) };
+    const pair = { roomId: crypto.randomUUID(), key: randomSecret(32) };
     const url = pairUrl('https://player.example', pair);
     expect(url.startsWith('https://player.example/remote.html#')).toBe(true);
     const hash = url.slice(url.indexOf('#'));
     expect(parsePairHash(hash)).toEqual(pair);
-  });
-
-  it('carries TURN ICE servers through the URL when present', () => {
-    const pair = {
-      roomId: randomSecret(16),
-      secret: randomSecret(32),
-      iceServers: [{ urls: ['turn:turn.cloudflare.com:3478'], username: 'u', credential: 'c' }],
-    };
-    const url = pairUrl('https://player.example', pair);
-    expect(url).toContain('&t=');
-    expect(parsePairHash(url.slice(url.indexOf('#')))).toEqual(pair);
-  });
-
-  it('omits the t param when there are no ICE servers', () => {
-    const url = pairUrl('https://player.example', { roomId: 'r', secret: 'k', iceServers: [] });
-    expect(url).not.toContain('&t=');
   });
 });
