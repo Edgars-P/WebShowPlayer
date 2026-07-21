@@ -173,6 +173,12 @@ export class RemoteHost {
       const room = joinRoom({ appId: REMOTE_APP_ID, password: this.secret }, this.roomId);
       this.room = room;
 
+      // A superseded room (after disconnect/regenerate) can still fire callbacks
+      // while its async `leave()` tears peers down, or when an old peer's
+      // connection closes later. Gate every handler on this being the current
+      // room so a dead room can't miscount peers or flip our status.
+      const isCurrent = () => room === this.room;
+
       // trystero's payload type wants a JSON index signature our snapshot type
       // doesn't carry; the value is plain JSON, so cast at the boundary.
       const state = room.makeAction('state');
@@ -180,11 +186,13 @@ export class RemoteHost {
 
       const cmd = room.makeAction('cmd');
       cmd.onMessage = (data) => {
+        if (!isCurrent()) return;
         // Untrusted: parseCommand inside applyCommand is the gate.
         applyCommand(this.actions, data);
       };
 
       room.onPeerJoin = () => {
+        if (!isCurrent()) return;
         this.peerCount = Object.keys(room.getPeers()).length;
         this.status = 'connected';
         // Catch the phone up on the current state at once, rather than waiting
@@ -192,6 +200,7 @@ export class RemoteHost {
         if (this.lastSnapshot) void state.send(this.lastSnapshot as unknown as DataPayload);
       };
       room.onPeerLeave = () => {
+        if (!isCurrent()) return;
         this.peerCount = Object.keys(room.getPeers()).length;
         if (this.peerCount === 0) this.status = 'waiting';
       };

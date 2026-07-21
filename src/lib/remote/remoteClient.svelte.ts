@@ -81,10 +81,22 @@ export class RemoteClient {
       const room = joinRoom({ appId: REMOTE_APP_ID, password: this.secret }, this.roomId);
       this.room = room;
 
+      // A superseded room can still fire callbacks after we've moved on: its
+      // `leave()` is async (it lingers ~100ms destroying peers), and an old
+      // peer's connection may close or error at any point after we've replaced
+      // it — which happens whenever a phone browser is backgrounded and
+      // reopened. Those stale callbacks must not touch the live state, or the
+      // dead room's onPeerLeave flips us back to 'reconnecting' and schedules a
+      // reconnect that tears down the fresh, working room — a loop that
+      // "connects for a split second, then drops" forever. Gate every handler
+      // on this room still being the current one.
+      const isCurrent = () => room === this.room;
+
       // The payloads are plain JSON; trystero's DataPayload constraint wants an
       // index signature our named types don't carry, so cast at the boundary.
       const state = room.makeAction('state');
       state.onMessage = (data) => {
+        if (!isCurrent()) return;
         this.snapshot = data as unknown as RemoteSnapshot;
         this.status = 'connected';
         this.lastSnapshotAt = Date.now();
@@ -95,9 +107,11 @@ export class RemoteClient {
       this.sendCmd = (c) => cmd.send(c as unknown as DataPayload);
 
       room.onPeerJoin = () => {
+        if (!isCurrent()) return;
         this.status = 'connected';
       };
       room.onPeerLeave = () => {
+        if (!isCurrent()) return;
         if (Object.keys(room.getPeers()).length === 0) {
           this.status = 'reconnecting';
           this.scheduleReconnect();
