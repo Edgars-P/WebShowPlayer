@@ -13,6 +13,7 @@
 // one of the fixed `RemoteCommand` shapes below.
 
 import type { PlaybackState } from '../types';
+import { decodeIceServers, encodeIceServers, type IceServer } from './turn';
 
 /** Bumped only if the wire shape changes incompatibly. */
 export const REMOTE_PROTOCOL = 1;
@@ -278,12 +279,20 @@ export function randomSecret(bytes = 32): string {
 export interface PairInfo {
   roomId: string;
   secret: string;
+  /**
+   * TURN ICE servers the player minted and shipped in the QR, if any. Optional:
+   * an old QR, or a player with no TURN key, simply omits them and the phone
+   * falls back to direct P2P + STUN.
+   */
+  iceServers?: IceServer[];
 }
 
 /**
- * Read the pairing info out of a URL hash fragment (`#r=<room>&k=<secret>`), or
- * null if either part is missing. The secret lives in the *fragment* on purpose:
- * fragments are never sent to a server, so scanning the QR never leaks it.
+ * Read the pairing info out of a URL hash fragment
+ * (`#r=<room>&k=<secret>[&t=<ice>]`), or null if the room or secret is missing.
+ * The secret lives in the *fragment* on purpose: fragments are never sent to a
+ * server, so scanning the QR never leaks it — and the same is true of the TURN
+ * credentials that ride alongside it.
  */
 export function parsePairHash(hash: string): PairInfo | null {
   const body = hash.startsWith('#') ? hash.slice(1) : hash;
@@ -291,10 +300,13 @@ export function parsePairHash(hash: string): PairInfo | null {
   const roomId = params.get('r');
   const secret = params.get('k');
   if (!roomId || !secret) return null;
-  return { roomId, secret };
+  const t = params.get('t');
+  const iceServers = t ? decodeIceServers(t) : null;
+  return iceServers && iceServers.length ? { roomId, secret, iceServers } : { roomId, secret };
 }
 
 /** Build the pairing URL a QR encodes, from an origin and the pair info. */
 export function pairUrl(origin: string, pair: PairInfo): string {
-  return `${origin}/remote.html#r=${encodeURIComponent(pair.roomId)}&k=${encodeURIComponent(pair.secret)}`;
+  const base = `${origin}/remote.html#r=${encodeURIComponent(pair.roomId)}&k=${encodeURIComponent(pair.secret)}`;
+  return pair.iceServers && pair.iceServers.length ? `${base}&t=${encodeIceServers(pair.iceServers)}` : base;
 }

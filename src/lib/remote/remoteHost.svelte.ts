@@ -12,7 +12,7 @@
 // (secret + room id) is persisted, so the same QR can be reused across sessions
 // — the *connection* is always an explicit, per-session choice.
 
-import { joinRoom, type DataPayload, type Room } from 'trystero/nostr';
+import { getRelaySockets, joinRoom, type DataPayload, type Room } from 'trystero/nostr';
 import { app } from '../state/project.svelte';
 import {
   applyCommand,
@@ -22,6 +22,8 @@ import {
   type RemoteHostActions,
   type RemoteSnapshot,
 } from './protocol';
+import { rlog } from './log';
+import { turn } from './turn.svelte';
 
 const STORAGE_KEY = 'showplayer.remote';
 
@@ -78,6 +80,8 @@ export class RemoteHost {
   private lastSentAt = 0;
   private flushTimer = 0;
   private heartbeatTimer = 0;
+  /** Timers for the post-drop signaling refresh burst (see startReconnectAssist). */
+  private assistTimers: number[] = [];
 
   /**
    * The whitelist mapped onto `app`. Every one of these is an existing method —
@@ -106,10 +110,20 @@ export class RemoteHost {
     setMaster: (v) => app.setMasterVolume(v),
   };
 
-  /** The URL the QR encodes, or '' before a pairing identity exists. */
+  /**
+   * The URL the QR encodes, or '' before a pairing identity exists. When a TURN
+   * key is configured, the freshly-minted ICE-server credentials ride along in
+   * the fragment, so the phone gets them from the QR without the API token ever
+   * leaving this machine. Reactive: the QR re-renders when `turn.iceServers`
+   * updates.
+   */
   get pairUrl(): string {
     if (!this.secret || !this.roomId) return '';
-    return buildPairUrl(location.origin, { roomId: this.roomId, secret: this.secret });
+    return buildPairUrl(location.origin, {
+      roomId: this.roomId,
+      secret: this.secret,
+      iceServers: turn.iceServers,
+    });
   }
 
   /**
@@ -138,12 +152,16 @@ export class RemoteHost {
     if (this.enabled) return;
     if (!this.secret || !this.roomId) this.mintPair();
     this.enabled = true;
+    // Mint TURN credentials (if a key is configured) so the QR carries them.
+    void turn.ensure();
+    rlog('host', 'enable');
     this.connect();
   }
 
   disable(): void {
     if (!this.enabled) return;
     this.enabled = false;
+    rlog('host', 'disable');
     this.disconnect();
   }
 
@@ -170,8 +188,14 @@ export class RemoteHost {
     this.status = 'waiting';
     this.lastError = '';
     try {
-      const room = joinRoom({ appId: REMOTE_APP_ID, password: this.secret }, this.roomId);
+      // turnConfig is trystero's list of extra ICE servers, appended to its
+      // built-in STUN. Empty when no TURN key is configured (direct P2P only).
+      const room = joinRoom(
+        { appId: REMOTE_APP_ID, password: this.secret, turnConfig: turn.iceServers as RTCIceServer[] },
+        this.roomId,
+      );
       this.room = room;
+      rlog('host', 'joined room', this.roomId, 'turn servers:', turn.iceServers.length);
 
       // A superseded room (after disconnect/regenerate) can still fire callbacks
       // while its async `leave()` tears peers down, or when an old peer's
@@ -195,6 +219,8 @@ export class RemoteHost {
         if (!isCurrent()) return;
         this.peerCount = Object.keys(room.getPeers()).length;
         this.status = 'connected';
+        this.stopReconnectAssist();
+        rlog('host', 'peer join; peers:', this.peerCount);
         // Catch the phone up on the current state at once, rather than waiting
         // for the next change to push one.
         if (this.lastSnapshot) void state.send(this.lastSnapshot as unknown as DataPayload);
@@ -202,7 +228,13 @@ export class RemoteHost {
       room.onPeerLeave = () => {
         if (!isCurrent()) return;
         this.peerCount = Object.keys(room.getPeers()).length;
-        if (this.peerCount === 0) this.status = 'waiting';
+        rlog('host', 'peer leave; peers:', this.peerCount);
+        if (this.peerCount === 0) {
+          this.status = 'waiting';
+          // A phone just dropped. It will try to come back — freshen signaling so
+          // it is actually seen (see startReconnectAssist).
+          this.startReconnectAssist();
+        }
       };
 
       this.heartbeatTimer = setInterval(() => {
@@ -213,13 +245,65 @@ export class RemoteHost {
       this.status = 'off';
       this.room = null;
       this.sendState = null;
+      rlog('host', 'join failed:', this.lastError);
     }
+  }
+
+  /**
+   * Force the signaling relays to reconnect. trystero caches relay websockets at
+   * module scope and reuses them across every rejoin, so a socket that has
+   * quietly died — TCP gone, but `readyState` still "open", which public nostr
+   * relays do routinely — leaves the host deaf to a returning phone with no way
+   * to recover short of reloading the whole player. Closing the sockets makes
+   * trystero re-establish and re-subscribe them.
+   *
+   * Safe to call anytime, even with a phone connected: relays only carry
+   * connection *setup*, never a live session's data (that travels the direct
+   * WebRTC channel), so an active remote is undisturbed.
+   */
+  refreshSignaling(reason: string): void {
+    let sockets: Record<string, WebSocket> = {};
+    try {
+      sockets = getRelaySockets() as Record<string, WebSocket>;
+    } catch {
+      return;
+    }
+    const states = Object.entries(sockets).map(([url, s]) => `${url.replace(/^wss?:\/\//, '')}=${s.readyState}`);
+    rlog('host', `refreshSignaling (${reason}); ${states.length} relays:`, states.join(' ') || '(none yet)');
+    for (const socket of Object.values(sockets)) {
+      try {
+        socket.close();
+      } catch {
+        // Already closing — nothing to do.
+      }
+    }
+  }
+
+  /**
+   * After a phone drops, refresh the signaling relays a few times over the next
+   * ~30s. This heals any relay socket that went dead while the phone was
+   * connected, so the phone's reconnect is discovered — the recovery that used
+   * to require reloading the player. Bounded (not a perpetual poll) to stay
+   * gentle on the public relays; cancelled the moment a peer reconnects.
+   */
+  private startReconnectAssist(): void {
+    this.stopReconnectAssist();
+    const schedule = [0, 4000, 12000, 30000];
+    this.assistTimers = schedule.map(
+      (delay) => setTimeout(() => this.refreshSignaling('reconnect-assist'), delay) as unknown as number,
+    );
+  }
+
+  private stopReconnectAssist(): void {
+    this.assistTimers.forEach(clearTimeout);
+    this.assistTimers = [];
   }
 
   private disconnect(): void {
     this.peerCount = 0;
     this.status = 'off';
     this.sendState = null;
+    this.stopReconnectAssist();
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = 0;

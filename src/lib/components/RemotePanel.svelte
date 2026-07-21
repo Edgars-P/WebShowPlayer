@@ -7,6 +7,7 @@
 
   import qrcode from 'qrcode-generator';
   import { remoteHost } from '../remote/remoteHost.svelte';
+  import { turn } from '../remote/turn.svelte';
 
   /** Render a QR for `text` as a self-contained, scalable SVG string. */
   function qrSvg(text: string): string {
@@ -51,6 +52,29 @@
     }
     remoteHost.regenerate();
   }
+
+  // --- TURN (Cloudflare) settings, configured like the Trello credentials. ---
+  let turnOpen = $state(false);
+  let keyId = $state('');
+  let apiToken = $state('');
+
+  function openTurn() {
+    keyId = turn.settings.keyId;
+    apiToken = turn.settings.apiToken;
+    turnOpen = true;
+  }
+
+  function saveTurn() {
+    turn.save({ keyId, apiToken });
+    turnOpen = false;
+  }
+
+  function clearTurn() {
+    turn.clear();
+    keyId = '';
+    apiToken = '';
+    turnOpen = false;
+  }
 </script>
 
 {#if remoteHost.panelOpen}
@@ -86,6 +110,13 @@
           <button class="ghost" onclick={copy}>{copied ? 'Copied' : 'Copy'}</button>
         </div>
         <div class="footer">
+          <button
+            class="ghost"
+            onclick={() => remoteHost.refreshSignaling('manual')}
+            title="Re-establish the signalling relays without reloading the player — use if a phone is stuck reconnecting"
+          >
+            Reconnect
+          </button>
           <button class="ghost danger" onclick={regenerate} title="Invalidate the current code and make a new one">
             Regenerate code
           </button>
@@ -97,6 +128,39 @@
       {#if remoteHost.lastError}
         <p class="err">{remoteHost.lastError}</p>
       {/if}
+
+      <!-- TURN relay: optional, helps a phone reconnect across network changes. -->
+      <div class="turn">
+        {#if turnOpen}
+          <label class="field">
+            <span>Cloudflare TURN key ID</span>
+            <input bind:value={keyId} placeholder="key id" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span>API token</span>
+            <input bind:value={apiToken} type="password" placeholder="token" autocomplete="off" spellcheck="false" />
+          </label>
+          <p class="hint">
+            The player mints short-lived credentials and ships them to the phone in the QR — the token never leaves this
+            computer. The same credentials serve both sides.
+          </p>
+          <div class="turnbtns">
+            <button class="ghost" onclick={saveTurn}>Save</button>
+            <button class="ghost" onclick={() => (turnOpen = false)}>Cancel</button>
+            {#if turn.configured}
+              <button class="ghost danger" onclick={clearTurn}>Remove</button>
+            {/if}
+          </div>
+          {#if turn.error}<p class="err">TURN: {turn.error}</p>{/if}
+        {:else}
+          <button class="ghost turnrow" onclick={openTurn}>
+            <span>TURN relay</span>
+            <span class="turnstate" class:on={turn.configured}>
+              {turn.configured ? (turn.iceServers.length ? 'Active' : turn.error ? 'Error' : 'Configured') : 'Off'}
+            </span>
+          </button>
+        {/if}
+      </div>
 
       <p class="note">The phone needs to be online to reach this site. The connection stays private to your paired devices.</p>
     </div>
@@ -197,10 +261,47 @@
   .footer {
     display: flex;
     justify-content: flex-end;
+    gap: 6px;
   }
   .danger {
     color: var(--danger);
     border-color: var(--danger);
+  }
+  .turn {
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .turnrow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+  }
+  .turnstate {
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .turnstate.on {
+    color: var(--ok);
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .field input {
+    font-size: 13px;
+    font-family: ui-monospace, monospace;
+    padding: 6px 8px;
+  }
+  .turnbtns {
+    display: flex;
+    gap: 6px;
   }
   .err {
     color: var(--danger);

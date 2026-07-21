@@ -54,6 +54,9 @@ vi.mock('trystero/nostr', () => ({
     rooms.push(room);
     return room;
   }),
+  // The client force-reconnects signalling relays on reconnect; give it an empty
+  // socket map so that path is a no-op under test.
+  getRelaySockets: vi.fn(() => ({})),
 }));
 
 // Imported after the mock is registered (vi.mock is hoisted above imports).
