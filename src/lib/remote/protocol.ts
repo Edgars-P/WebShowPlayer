@@ -20,6 +20,14 @@ export const REMOTE_PROTOCOL = 1;
 
 // ---- State the phone renders (host → phone) -------------------------------
 
+/**
+ * The small glyph a cue's subtitle leads with at rest (never shown while a
+ * remaining-time countdown has replaced it) — a key rather than a rendered
+ * icon, since the wire only carries data: the host and the phone each pick
+ * their own icon for it locally.
+ */
+export type SubtitleIcon = 'proxy' | 'timer' | 'video' | 'globalAll' | 'globalOne' | null;
+
 export interface RemoteCue {
   id: string;
   name: string;
@@ -30,6 +38,7 @@ export interface RemoteCue {
   unavailable: boolean;
   /** Second line: the cue's kind at rest, or its remaining time while running. */
   subtitle: string;
+  subtitleIcon: SubtitleIcon;
   row: number;
   col: number;
 }

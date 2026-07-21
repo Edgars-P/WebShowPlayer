@@ -478,7 +478,11 @@ export class Doc {
     this.firing.add(target.id);
 
     if (target.type === 'audio') {
-      const f = fade ?? false;
+      // Undefined means the trigger's Fade box was never touched. Its UI
+      // default is on (TriggerEditor: `checked={trig.fade ?? true}`), so match
+      // that here — otherwise a fresh trigger looks like it fades but doesn't
+      // until the box is toggled off and on.
+      const f = fade ?? true;
       switch (action) {
         case 'click':
           this.engine.toggle(target);

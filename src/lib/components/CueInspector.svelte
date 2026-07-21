@@ -17,6 +17,8 @@
   } from '../types';
   import CuePicker from './CuePicker.svelte';
   import TriggerEditor from './TriggerEditor.svelte';
+  import IconClose from '~icons/bi/x-lg';
+  import IconRemove from '~icons/bi/x';
 
   let cue = $derived(app.propertiesCue);
 
@@ -75,7 +77,7 @@
     <div class="dialog" role="dialog" aria-modal="true">
       <header>
         <h3>{cue.type.toUpperCase()} cue — row {cue.row}, col {cue.col}</h3>
-        <button class="close" title="Close" onclick={close}>×</button>
+        <button class="close" title="Close" onclick={close}><IconClose /></button>
       </header>
 
       <div class="content">
@@ -384,7 +386,7 @@
                   }}
                 />
                 <button class="x" onclick={() => setHeaders(c, headerRows(c).filter((_, j) => j !== i))}
-                  >×</button
+                  ><IconRemove /></button
                 >
               </div>
             {/each}

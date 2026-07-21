@@ -12,7 +12,7 @@
   import { app } from '../state/project.svelte';
   import type { CueDisplay } from '../state/project.svelte';
   import { remoteHost } from '../remote/remoteHost.svelte';
-  import { buildSnapshot, type RemoteCue, type SnapshotInput } from '../remote/protocol';
+  import { buildSnapshot, type RemoteCue, type SnapshotInput, type SubtitleIcon } from '../remote/protocol';
   import { formatTime } from '../timer/timer';
   import type { Cue } from '../types';
 
@@ -34,48 +34,53 @@
 
   /**
    * The cue's second line, mirroring CueButton.subtitle: a live cue shows its
-   * remaining time, an idle one shows what kind of cue it is.
+   * remaining time, an idle one shows what kind of cue it is. The icon is sent
+   * as a key, not a glyph — the phone picks its own icon for it, same as the
+   * host does for CueButton (see `SubtitleIcon` in protocol.ts).
    */
-  function subtitleFor(cue: Cue, info: CueDisplay): string {
-    if (info.missing) return 'media missing';
-    if (info.pending) return 'loading…';
-    if (info.unavailable) return 'no screen';
+  function subtitleFor(cue: Cue, info: CueDisplay): { icon: SubtitleIcon; text: string } {
+    if (info.missing) return { icon: null, text: 'media missing' };
+    if (info.pending) return { icon: null, text: 'loading…' };
+    if (info.unavailable) return { icon: null, text: 'no screen' };
 
     if (info.state !== 'idle') {
       if (cue.type === 'audio') {
         const r = app.remaining(cue);
-        if (r > 0) return `−${formatTime(r)}`;
+        if (r > 0) return { icon: null, text: `−${formatTime(r)}` };
       } else if (cue.type === 'proxy') {
         const t = app.resolveProxy(cue);
         if (t && t.type === 'audio') {
           const r = app.remaining(t);
-          if (r > 0) return `−${formatTime(r)}`;
+          if (r > 0) return { icon: null, text: `−${formatTime(r)}` };
         }
       } else if (cue.type === 'video') {
         const { duration, position } = app.videoStatus;
-        if (duration > 0) return `−${formatTime(Math.max(0, duration - position))}`;
+        if (duration > 0) return { icon: null, text: `−${formatTime(Math.max(0, duration - position))}` };
       } else if (cue.type === 'timer') {
-        if (app.timer.duration > 0) return `−${formatTime(app.timer.remaining)}`;
+        if (app.timer.duration > 0) return { icon: null, text: `−${formatTime(app.timer.remaining)}` };
       }
     }
 
     switch (cue.type) {
       case 'audio': {
         const secs = app.duration(cue);
-        return secs > 0 ? formatTime(secs) : 'audio';
+        return { icon: null, text: secs > 0 ? formatTime(secs) : 'audio' };
       }
       case 'proxy': {
         const t = app.resolveProxy(cue);
-        return `⇄ ${t && t.type !== 'proxy' ? app.display(t).name || 'audio' : 'nothing'}`;
+        return { icon: 'proxy', text: t && t.type !== 'proxy' ? app.display(t).name || 'audio' : 'nothing' };
       }
       case 'timer':
-        return `⏱ ${cue.action === 'set' ? formatTime(cue.duration) : cue.action}`;
+        return { icon: 'timer', text: cue.action === 'set' ? formatTime(cue.duration) : cue.action };
       case 'video':
-        return cue.action === 'play' ? `▶ ${clipName(cue.file)}` : `▶ ${cue.action}`;
+        return { icon: 'video', text: cue.action === 'play' ? clipName(cue.file) : cue.action };
       case 'global':
-        return `${cue.scope === 'all' ? '◎ every file' : '◉'} ${cue.action}${cue.fade ? '' : ' · cut'}`;
+        return {
+          icon: cue.scope === 'all' ? 'globalAll' : 'globalOne',
+          text: `${cue.scope === 'all' ? 'every file ' : ''}${cue.action}${cue.fade ? '' : ' · cut'}`,
+        };
       case 'http':
-        return `${cue.method} ${urlHost(cue.url)}`;
+        return { icon: null, text: `${cue.method} ${urlHost(cue.url)}` };
     }
   }
 
@@ -99,6 +104,7 @@
             name: tab.name,
             cues: tab.cues.map((cue): RemoteCue => {
               const info = app.display(cue);
+              const sub = subtitleFor(cue, info);
               return {
                 id: cue.id,
                 name: info.name,
@@ -107,7 +113,8 @@
                 missing: info.missing,
                 pending: info.pending,
                 unavailable: !!info.unavailable,
-                subtitle: subtitleFor(cue, info),
+                subtitle: sub.text,
+                subtitleIcon: sub.icon,
                 row: cue.row,
                 col: cue.col,
               };

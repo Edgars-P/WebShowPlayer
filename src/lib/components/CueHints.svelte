@@ -11,7 +11,16 @@
   // the two vocabularies simply cannot reach each other.
   import { fade } from 'svelte/transition';
   import type { TriggerHint } from '../state/doc.svelte';
-  import type { TriggerEvent } from '../types';
+  import type { TriggerAction, TriggerEvent } from '../types';
+  import type { Component } from 'svelte';
+  import IconPlayFill from '~icons/bi/play-fill';
+  import IconPlay from '~icons/bi/play';
+  import IconPauseFill from '~icons/bi/pause-fill';
+  import IconStopFill from '~icons/bi/stop-fill';
+  import IconSkipEnd from '~icons/bi/skip-end-fill';
+  import IconClick from '~icons/bi/record-circle';
+  import IconStopwatchFill from '~icons/bi/stopwatch-fill';
+  import IconClear from '~icons/bi/slash-circle';
 
   /** Matches the tile's own highlight transition, so ring and panel move together. */
   const FADE_MS = 120;
@@ -29,21 +38,21 @@
 
   // Filled glyphs = a definite transport action; hollow = a softer variant, so
   // start/resume and stop/pause stay distinguishable at 10px.
-  const EVENT_GLYPH = {
-    onStart: '▶',
-    onPause: '⏸',
-    onStop: '⏹',
-    onEnd: '⇥',
-  } as const;
-  const ACTION_GLYPH = {
-    click: '⊙',
-    start: '▶',
-    resume: '▷',
-    pause: '⏸',
-    stop: '⏹',
-    set: '⏱',
-    clear: '⊘',
-  } as const;
+  const EVENT_GLYPH: Record<TriggerEvent, Component> = {
+    onStart: IconPlayFill,
+    onPause: IconPauseFill,
+    onStop: IconStopFill,
+    onEnd: IconSkipEnd,
+  };
+  const ACTION_GLYPH: Record<TriggerAction, Component> = {
+    click: IconClick,
+    start: IconPlayFill,
+    resume: IconPlay,
+    pause: IconPauseFill,
+    stop: IconStopFill,
+    set: IconStopwatchFill,
+    clear: IconClear,
+  };
   const EVENT_WORD = {
     onStart: 'when it starts',
     onPause: 'when it pauses',
@@ -67,9 +76,11 @@
   <span class="hints" transition:fade={{ duration: FADE_MS }}>
     {#each EVENT_ORDER as event (event)}
       {@const list = hintsFor(event)}
+      {@const WhenIcon = EVENT_GLYPH[event]}
+      {@const WhatIcon = list.length ? ACTION_GLYPH[list[0].action] : null}
       <span class="slot" class:acts={list.length > 0} class:now={list[0]?.now} title={hintTitle(event)}>
-        <span class="box when">{EVENT_GLYPH[event]}</span>
-        <span class="box what">{list.length ? ACTION_GLYPH[list[0].action] : ''}</span>
+        <span class="box when"><WhenIcon /></span>
+        <span class="box what">{#if WhatIcon}<WhatIcon />{/if}</span>
       </span>
     {/each}
   </span>

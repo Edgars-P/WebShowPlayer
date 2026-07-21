@@ -3,6 +3,10 @@
   import { trello } from '../state/trello.svelte';
   import { remoteHost } from '../remote/remoteHost.svelte';
   import { formatTime, timerColor } from '../timer/timer';
+  import IconPlayFill from '~icons/bi/play-fill';
+  import IconPauseFill from '~icons/bi/pause-fill';
+  import IconStopFill from '~icons/bi/stop-fill';
+  import IconBlank from '~icons/bi/square';
 
   let project = $derived(app.project);
   let timer = $derived(app.timer);
@@ -81,10 +85,10 @@
         disabled={!timerActive || timer.finished}
         onclick={() => (timer.running ? app.pauseTimer() : app.resumeTimer())}
       >
-        {timer.running ? '⏸' : '▶'}
+        {#if timer.running}<IconPauseFill />{:else}<IconPlayFill />{/if}
       </button>
       <button class="ghost icon" title="Clear timer" disabled={!timerActive} onclick={() => app.clearTimer()}>
-        ⏹
+        <IconStopFill />
       </button>
     </div>
 
@@ -93,9 +97,9 @@
         {#if app.videoActive && app.videoStatus.duration > 0}
           {formatTime(app.videoStatus.duration - app.videoStatus.position)}
         {:else if app.videoActive}
-          ▶ video
+          <IconPlayFill /> video
         {:else}
-          ▢
+          <IconBlank />
         {/if}
       </span>
       <button
@@ -104,7 +108,7 @@
         disabled={!app.videoActive}
         onclick={() => (app.video.playing ? app.pauseVideo() : app.resumeVideo())}
       >
-        {app.video.playing ? '⏸' : '▶'}
+        {#if app.video.playing}<IconPauseFill />{:else}<IconPlayFill />{/if}
       </button>
       <button
         class="ghost icon"
@@ -112,7 +116,7 @@
         disabled={!app.videoActive}
         onclick={() => app.clearVideo()}
       >
-        ⏹
+        <IconStopFill />
       </button>
       <button
         class="ghost"
@@ -160,7 +164,7 @@
         disabled={!app.anyPlaying}
         onclick={() => app.stopAllAudio(false)}
       >
-        ⏹ Stop all
+        <IconStopFill /> Stop all
       </button>
     </div>
 

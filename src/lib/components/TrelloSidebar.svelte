@@ -1,6 +1,10 @@
 <script lang="ts">
   import { trello, authorizeUrl, POLL_MS, type TrelloSettings } from '../state/trello.svelte';
   import { isDone, labelColor, labelTitle } from '../trello/client';
+  import IconSettings from '~icons/bi/gear-fill';
+  import IconCollapse from '~icons/bi/chevron-right';
+  import IconRefresh from '~icons/bi/arrow-clockwise';
+  import IconDone from '~icons/bi/check-lg';
 
   let list = $derived(trello.list);
 
@@ -41,8 +45,8 @@
       <header class="head">
         <span class="title" title={list?.name ?? ''}>{list?.name ?? 'Trello'}</span>
         {#if list}<span class="count">{list.cards.length}</span>{/if}
-        <button class="ghost icon" title="Settings" onclick={openSettings}>⚙</button>
-        <button class="ghost icon" title="Hide sidebar" onclick={() => (trello.collapsed = true)}>›</button>
+        <button class="ghost icon" title="Settings" onclick={openSettings}><IconSettings /></button>
+        <button class="ghost icon" title="Hide sidebar" onclick={() => (trello.collapsed = true)}><IconCollapse /></button>
       </header>
 
       {#if trello.settingsOpen}
@@ -92,7 +96,7 @@
                 </div>
               {/if}
               <div class="name">
-                {#if done}<span class="tick" title="Marked complete">✓</span>{/if}{card.name}
+                {#if done}<span class="tick" title="Marked complete"><IconDone /></span>{/if}{card.name}
               </div>
             </article>
           {:else}
@@ -106,7 +110,7 @@
           <span class="age" class:stale={trello.lastUpdated > 0 && now - trello.lastUpdated > POLL_MS * 3}>
             {trello.loading ? 'refreshing…' : age}
           </span>
-          <button class="ghost icon" title="Refresh now" onclick={() => trello.refresh()}>⟳</button>
+          <button class="ghost icon" title="Refresh now" onclick={() => trello.refresh()}><IconRefresh /></button>
         </footer>
       {/if}
     </aside>

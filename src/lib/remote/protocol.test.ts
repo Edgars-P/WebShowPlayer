@@ -21,6 +21,7 @@ function cue(over: Partial<RemoteCue> & { id: string; row: number; col: number }
     pending: false,
     unavailable: false,
     subtitle: '',
+    subtitleIcon: null,
     ...over,
   };
 }
@@ -119,6 +120,7 @@ describe('buildSnapshot', () => {
       pending: false,
       unavailable: false,
       subtitle: '−1:00',
+      subtitleIcon: null,
     });
   });
 });

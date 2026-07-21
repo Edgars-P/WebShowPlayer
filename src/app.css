@@ -66,6 +66,17 @@ button.ghost {
   background: transparent;
 }
 
+/* Iconify icons render as inline SVG (unplugin-icons, compiler: 'svelte');
+   size them to the surrounding text and nudge the baseline so they sit level
+   with adjacent labels instead of hanging high. */
+button svg,
+.bi {
+  width: 1em;
+  height: 1em;
+  vertical-align: -0.125em;
+  flex: none;
+}
+
 input,
 select,
 textarea {

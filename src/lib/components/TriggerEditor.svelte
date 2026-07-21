@@ -2,6 +2,12 @@
   import { app } from '../state/project.svelte';
   import type { Cue, CueRef, Trigger, TriggerAction, TriggerEvent } from '../types';
   import CuePicker from './CuePicker.svelte';
+  import IconPlayFill from '~icons/bi/play-fill';
+  import IconPauseFill from '~icons/bi/pause-fill';
+  import IconStopFill from '~icons/bi/stop-fill';
+  import IconSkipEnd from '~icons/bi/skip-end-fill';
+  import IconRemove from '~icons/bi/x';
+  import type { Component } from 'svelte';
 
   let { cue }: { cue: Cue } = $props();
 
@@ -17,11 +23,11 @@
     http: ['onStart'],
     global: ['onStart'],
   };
-  const EVENT_GLYPH: Record<TriggerEvent, string> = {
-    onStart: '▶',
-    onPause: '⏸',
-    onStop: '⏹',
-    onEnd: '⇥',
+  const EVENT_GLYPH: Record<TriggerEvent, Component> = {
+    onStart: IconPlayFill,
+    onPause: IconPauseFill,
+    onStop: IconStopFill,
+    onEnd: IconSkipEnd,
   };
   const EVENT_LABEL: Record<Cue['type'], Partial<Record<TriggerEvent, string>>> = {
     audio: { onStart: 'Start', onPause: 'Pause', onStop: 'Stop', onEnd: 'Ends on its own' },
@@ -122,6 +128,7 @@
       <div class="line events">
         {#if EVENTS_BY_TYPE[cue.type].length > 1}
           {#each EVENTS_BY_TYPE[cue.type] as ev (ev)}
+            {@const Icon = EVENT_GLYPH[ev]}
             <button
               type="button"
               class="evt"
@@ -129,12 +136,12 @@
               title={EVENT_LABEL[cue.type][ev]}
               onclick={() => toggleEvent(trig, ev)}
             >
-              {EVENT_GLYPH[ev]}
+              <Icon />
             </button>
           {/each}
         {/if}
         <span class="spacer"></span>
-        <button class="x" title="Remove" onclick={() => remove(i)}>×</button>
+        <button class="x" title="Remove" onclick={() => remove(i)}><IconRemove /></button>
       </div>
       <CuePicker target={trig.target} />
       {#if targetCue}

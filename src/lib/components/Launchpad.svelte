@@ -3,6 +3,8 @@
   import { isAudioFile } from '../fs/projectFs';
   import CueButton from './CueButton.svelte';
   import { cueDrag } from './cueDrag.svelte';
+  import IconCopy from '~icons/bi/plus-lg';
+  import IconMove from '~icons/bi/arrow-right';
 
   let project = $derived(app.project);
   let tab = $derived(app.activeTab);
@@ -135,7 +137,7 @@
       style:top="{cueDrag.y}px"
       style:--cue-color={info.color}
     >
-      <span class="verb">{cueDrag.copy ? '＋' : '→'}</span>
+      <span class="verb">{#if cueDrag.copy}<IconCopy />{:else}<IconMove />{/if}</span>
       {info.name || carried.type}
     </div>
   {/if}

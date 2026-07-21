@@ -2,6 +2,8 @@
   // Top-level tab strip: one tab per open cue file. The strip below it (TabBar)
   // switches between tabs *within* the active file.
   import { app, type MenuItem } from '../state/project.svelte';
+  import IconClose from '~icons/bi/x';
+  import IconFolder from '~icons/bi/folder2-open';
 
   function onDocContext(e: MouseEvent, id: string) {
     e.preventDefault();
@@ -35,11 +37,11 @@
         {/if}
         <span class="title">{doc.title}</span>
       </button>
-      <button class="close" title="Close" onclick={() => app.closeDoc(doc.id)}>×</button>
+      <button class="close" title="Close" onclick={() => app.closeDoc(doc.id)}><IconClose /></button>
     </div>
   {/each}
   <button class="add" title="Open or create another cue file" onclick={() => app.showChooser()}>+</button>
-  <button class="add folder" title="Open another folder…" onclick={() => app.openFolder()}>📁</button>
+  <button class="add folder" title="Open another folder…" onclick={() => app.openFolder()}><IconFolder /></button>
 </div>
 
 <style>

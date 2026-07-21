@@ -4,6 +4,12 @@
   import { formatTime } from '../timer/timer';
   import type { Cue } from '../types';
   import CueHints from './CueHints.svelte';
+  import type { Component } from 'svelte';
+  import IconProxy from '~icons/bi/arrow-left-right';
+  import IconStopwatchFill from '~icons/bi/stopwatch-fill';
+  import IconPlayFill from '~icons/bi/play-fill';
+  import IconGlobalAll from '~icons/bi/collection-fill';
+  import IconGlobalOne from '~icons/bi/file-earmark-fill';
   import { cubicOut } from 'svelte/easing';
   import { Tween } from 'svelte/motion';
   import {
@@ -229,28 +235,36 @@
    * the one thing on a running tile carrying no information — while the number
    * an operator is actually waiting on has nowhere else to live.
    */
-  function subtitle(): string {
-    if (info.missing) return 'media missing';
-    if (info.pending) return 'loading…';
-    if (info.unavailable) return 'no screen';
-    if (active && length > 0) return `−${formatTime(Math.max(0, length * (1 - played)))}`;
+  function subtitle(): { icon: Component | null; text: string } {
+    if (info.missing) return { icon: null, text: 'media missing' };
+    if (info.pending) return { icon: null, text: 'loading…' };
+    if (info.unavailable) return { icon: null, text: 'no screen' };
+    if (active && length > 0) {
+      return { icon: null, text: `−${formatTime(Math.max(0, length * (1 - played)))}` };
+    }
 
     switch (cue.type) {
       case 'audio': {
         const secs = app.duration(cue);
-        return secs > 0 ? formatTime(secs) : 'audio';
+        return { icon: null, text: secs > 0 ? formatTime(secs) : 'audio' };
       }
       case 'proxy':
-        return `⇄ ${target && target.type !== 'proxy' ? app.display(target).name || 'audio' : 'nothing'}`;
+        return {
+          icon: IconProxy,
+          text: target && target.type !== 'proxy' ? app.display(target).name || 'audio' : 'nothing',
+        };
       case 'timer':
-        return `⏱ ${cue.action === 'set' ? formatTime(cue.duration) : cue.action}`;
+        return { icon: IconStopwatchFill, text: cue.action === 'set' ? formatTime(cue.duration) : cue.action };
       case 'video':
-        return cue.action === 'play' ? `▶ ${clipName(cue.file)}` : `▶ ${cue.action}`;
+        return { icon: IconPlayFill, text: cue.action === 'play' ? clipName(cue.file) : cue.action };
       case 'global':
         // Scope first: reaching into other cue files is the surprising part.
-        return `${cue.scope === 'all' ? '◎ every file' : '◉'} ${cue.action}${cue.fade ? '' : ' · cut'}`;
+        return {
+          icon: cue.scope === 'all' ? IconGlobalAll : IconGlobalOne,
+          text: `${cue.scope === 'all' ? 'every file ' : ''}${cue.action}${cue.fade ? '' : ' · cut'}`,
+        };
       case 'http':
-        return `${cue.method} ${host(cue.url)}`;
+        return { icon: null, text: `${cue.method} ${host(cue.url)}` };
     }
   }
 
@@ -298,9 +312,11 @@
        same: clicking this one stops a cue somewhere else. The mark is the only
        thing on the tile that stays put in every state, because that difference
        doesn't go away when the cue starts. -->
-  {#if cue.type === 'proxy'}<span class="mark" aria-hidden="true">⇄</span>{/if}
+  {#if cue.type === 'proxy'}<span class="mark" aria-hidden="true"><IconProxy /></span>{/if}
   <span class="title">{info.name || DEFAULT_LABELS[cue.type] || '—'}</span>
-  <span class="sub">{subtitle()}</span>
+  {@const sub = subtitle()}
+  {@const SubIcon = sub.icon}
+  <span class="sub">{#if SubIcon}<SubIcon />{/if}{sub.text}</span>
 {/snippet}
 
 <!--
@@ -558,6 +574,9 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .sub :global(svg) {
+    margin-right: 3px;
   }
 
   /* Keyed off the hit area, not the tile — hovering the gap has to light the

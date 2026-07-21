@@ -32,6 +32,12 @@ export class RemoteClient {
   status = $state<ClientStatus>('connecting');
   /** The most recent state the host pushed, or null before the first arrives. */
   snapshot = $state<RemoteSnapshot | null>(null);
+  /**
+   * Bumped every time the host speaks (any snapshot). The UI uses it to tell
+   * "the host has said something since my tap" apart from "still waiting" — the
+   * signal that clears a button's just-sent acknowledgement.
+   */
+  rev = $state(0);
   /** True when connected but no snapshot has arrived for a while (frozen link). */
   stale = $state(false);
   error = $state('');
@@ -136,6 +142,7 @@ export class RemoteClient {
     }
     if (msg.k === 'state') {
       this.snapshot = msg.d as RemoteSnapshot;
+      this.rev++;
       this.status = 'connected';
       this.lastSnapshotAt = Date.now();
       this.stale = false;
@@ -150,14 +157,20 @@ export class RemoteClient {
     }, RECONNECT_MS) as unknown as number;
   }
 
-  /** Fire a command at the host. No-op until the socket is open. */
-  send(cmd: RemoteCommand): void {
-    if (this.socket?.readyState !== WebSocket.OPEN) return;
+  /**
+   * Fire a command at the host. No-op until the socket is open. Returns whether
+   * the command actually left the phone, so the UI only acknowledges taps that
+   * were really sent.
+   */
+  send(cmd: RemoteCommand): boolean {
+    if (this.socket?.readyState !== WebSocket.OPEN) return false;
     const frame: ControllerFrame = { k: 'cmd', d: cmd };
     try {
       this.socket.send(JSON.stringify(frame));
+      return true;
     } catch {
       // A failing send means the socket is closing; the reconnect path handles it.
+      return false;
     }
   }
 

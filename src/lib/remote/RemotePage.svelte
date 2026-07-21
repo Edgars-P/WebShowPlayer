@@ -8,6 +8,28 @@
   import { remoteClient } from './remoteClient.svelte';
   import { formatTime } from '../timer/timer';
   import type { RemoteCommand } from './protocol';
+  import IconPlayFill from '~icons/bi/play-fill';
+  import IconPauseFill from '~icons/bi/pause-fill';
+  import IconStopFill from '~icons/bi/stop-fill';
+  import IconCircleFill from '~icons/bi/circle-fill';
+  import IconCircle from '~icons/bi/circle';
+  import IconBlank from '~icons/bi/square';
+  import IconCaretUpFill from '~icons/bi/caret-up-fill';
+  import IconCaretDownFill from '~icons/bi/caret-down-fill';
+  import IconProxy from '~icons/bi/arrow-left-right';
+  import IconStopwatchFill from '~icons/bi/stopwatch-fill';
+  import IconGlobalAll from '~icons/bi/collection-fill';
+  import IconGlobalOne from '~icons/bi/file-earmark-fill';
+  import type { SubtitleIcon } from './protocol';
+  import type { Component } from 'svelte';
+
+  const SUBTITLE_ICON: Record<Exclude<SubtitleIcon, null>, Component> = {
+    proxy: IconProxy,
+    timer: IconStopwatchFill,
+    video: IconPlayFill,
+    globalAll: IconGlobalAll,
+    globalOne: IconGlobalOne,
+  };
 
   onMount(() => remoteClient.start());
 
@@ -23,6 +45,34 @@
 
   function send(cmd: RemoteCommand) {
     remoteClient.send(cmd);
+  }
+
+  // Instant tap acknowledgement. The moment a command leaves the phone we mark
+  // its control "sent" and remember the snapshot revision it went out on; the
+  // control keeps that look until the host next speaks (rev advances) — its
+  // response — or a short cap elapses, whichever comes first. This is
+  // deliberately separate from the snapshot-driven live/pending styling below:
+  // it reports the phone→host leg (your tap registered and was sent), not that
+  // the player has actually done the thing yet.
+  const SENT_CAP_MS = 1200;
+  let sentRev = $state<Record<string, number>>({});
+
+  function fire(key: string, cmd: RemoteCommand) {
+    if (!remoteClient.send(cmd)) return; // nothing to acknowledge if it didn't go
+    const rev = remoteClient.rev;
+    sentRev = { ...sentRev, [key]: rev };
+    setTimeout(() => {
+      if (sentRev[key] === rev) {
+        const { [key]: _drop, ...rest } = sentRev;
+        sentRev = rest;
+      }
+    }, SENT_CAP_MS);
+  }
+
+  // A control still awaiting the host's echo: sent, and no snapshot has landed
+  // since. Once rev moves past the value we recorded, the acknowledgement clears.
+  function isSent(key: string): boolean {
+    return sentRev[key] !== undefined && sentRev[key] === remoteClient.rev;
   }
 
   let statusText = $derived(
@@ -59,58 +109,86 @@
       <button
         class="chip"
         class:on={snap.screenLive}
-        onclick={() => send({ t: 'openScreen' })}
+        class:sent={isSent('screen')}
+        onclick={() => fire('screen', { t: 'openScreen' })}
         title="Open the projector screen on the player"
       >
-        Screen {snap.screenLive ? '●' : '○'}
+        Screen {#if snap.screenLive}<IconCircleFill />{:else}<IconCircle />{/if}
       </button>
 
       <div class="chip group" class:live={snap.timer.active}>
         <span class="clock">{snap.timer.active ? formatTime(snap.timer.remaining) : '—:—'}</span>
         <button
           class="mini"
+          class:sent={isSent('timer-play')}
           disabled={!snap.timer.active || snap.timer.finished}
-          onclick={() => send(snap.timer.running ? { t: 'timerPause' } : { t: 'timerResume' })}
-        >{snap.timer.running ? '⏸' : '▶'}</button>
-        <button class="mini" disabled={!snap.timer.active} onclick={() => send({ t: 'timerClear' })}>⏹</button>
+          onclick={() => fire('timer-play', snap.timer.running ? { t: 'timerPause' } : { t: 'timerResume' })}
+        >{#if snap.timer.running}<IconPauseFill />{:else}<IconPlayFill />{/if}</button>
+        <button
+          class="mini"
+          class:sent={isSent('timer-clear')}
+          disabled={!snap.timer.active}
+          onclick={() => fire('timer-clear', { t: 'timerClear' })}
+        ><IconStopFill /></button>
       </div>
 
       <div class="chip group" class:live={snap.video.active}>
-        <span class="clock">{snap.video.active ? formatTime(snap.video.remaining) : '▢'}</span>
+        <span class="clock">{#if snap.video.active}{formatTime(snap.video.remaining)}{:else}<IconBlank />{/if}</span>
         <button
           class="mini"
+          class:sent={isSent('video-play')}
           disabled={!snap.video.active}
-          onclick={() => send(snap.video.playing ? { t: 'videoPause' } : { t: 'videoResume' })}
-        >{snap.video.playing ? '⏸' : '▶'}</button>
-        <button class="mini" disabled={!snap.video.active} onclick={() => send({ t: 'videoClear' })}>⏹</button>
+          onclick={() => fire('video-play', snap.video.playing ? { t: 'videoPause' } : { t: 'videoResume' })}
+        >{#if snap.video.playing}<IconPauseFill />{:else}<IconPlayFill />{/if}</button>
+        <button
+          class="mini"
+          class:sent={isSent('video-clear')}
+          disabled={!snap.video.active}
+          onclick={() => fire('video-clear', { t: 'videoClear' })}
+        ><IconStopFill /></button>
       </div>
     </div>
 
     <!-- Panic bar: always visible, big targets. -->
     <div class="panic">
-      <button class="fade" disabled={!snap.anyPlaying} onclick={() => send({ t: 'stopAll', fade: true })}>
+      <button
+        class="fade"
+        class:sent={isSent('fade-all')}
+        disabled={!snap.anyPlaying}
+        onclick={() => fire('fade-all', { t: 'stopAll', fade: true })}
+      >
         Fade all
       </button>
-      <button class="stop" disabled={!snap.anyPlaying} onclick={() => send({ t: 'stopAll', fade: false })}>
-        ⏹ Stop all
+      <button
+        class="stop"
+        class:sent={isSent('stop-all')}
+        disabled={!snap.anyPlaying}
+        onclick={() => fire('stop-all', { t: 'stopAll', fade: false })}
+      >
+        <IconStopFill /> Stop all
       </button>
     </div>
 
     {#if snap.docs.length > 1}
       <div class="docs">
         {#each snap.docs as d (d.id)}
-          <button class="docbtn" class:active={d.id === snap.activeDocId} onclick={() => send({ t: 'selectDoc', docId: d.id })}>
+          <button
+            class="docbtn"
+            class:active={d.id === snap.activeDocId}
+            class:sent={isSent(`doc-${d.id}`)}
+            onclick={() => fire(`doc-${d.id}`, { t: 'selectDoc', docId: d.id })}
+          >
             {d.title}
           </button>
         {/each}
       </div>
     {/if}
 
-    <!-- Tab strip: browsing here is local; a • marks the player's live tab. -->
+    <!-- Tab strip: browsing here is local; a dot marks the player's live tab. -->
     <div class="tabs">
       {#each snap.tabs as t (t.id)}
         <button class="tabbtn" class:active={t.id === viewTabId} onclick={() => (localTab = t.id)}>
-          {t.name}{#if t.id === snap.activeTabId}<span class="livedot" title="Live on the player">•</span>{/if}
+          {t.name}{#if t.id === snap.activeTabId}<span class="livedot" title="Live on the player"><IconCircleFill /></span>{/if}
         </button>
       {/each}
     </div>
@@ -119,23 +197,25 @@
     <div class="stack">
       {#if tab}
         {#each tab.cues as cue (cue.id)}
+          {@const SubIcon = cue.subtitleIcon ? SUBTITLE_ICON[cue.subtitleIcon] : null}
           <button
             class="cue state-{cue.state}"
             class:missing={cue.missing}
             class:pending={cue.pending}
             class:unavailable={cue.unavailable}
+            class:sent={isSent(`cue-${cue.id}`)}
             style:--cue-color={cue.color}
             disabled={cue.unavailable}
-            onclick={() => send({ t: 'activateCue', cueId: cue.id })}
+            onclick={() => fire(`cue-${cue.id}`, { t: 'activateCue', cueId: cue.id })}
           >
             <span class="swatch"></span>
             <span class="labels">
               <span class="name">{cue.name || '—'}</span>
-              <span class="sub">{cue.subtitle}</span>
+              <span class="sub">{#if SubIcon}<SubIcon />{/if}{cue.subtitle}</span>
             </span>
             {#if cue.state !== 'idle'}
               <span class="live live-{cue.state}" title={cue.state}>
-                {#if cue.state === 'fadingIn'}▲{:else if cue.state === 'fadingOut'}▼{/if}
+                {#if cue.state === 'fadingIn'}<IconCaretUpFill />{:else if cue.state === 'fadingOut'}<IconCaretDownFill />{/if}
               </span>
             {/if}
           </button>
@@ -309,6 +389,7 @@
   .livedot {
     color: var(--ok);
     margin-left: 4px;
+    font-size: 8px;
   }
 
   .stack {
@@ -361,8 +442,11 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .sub :global(svg) {
+    margin-right: 3px;
+  }
   /* The live badge carries the fade *direction*, statically: a dot means
-     playing, ▲ fading in, ▼ fading out — a glance tells the three apart. The
+     playing, an up caret fading in, a down caret fading out — a glance tells the three apart. The
      border colour reinforces it: cue-coloured steady, green rising, amber
      falling. No motion — a show is watched for hours and a pulse only nags. */
   .cue .live {
@@ -412,5 +496,29 @@
   .cue.unavailable {
     filter: saturate(0.15);
     opacity: 0.6;
+  }
+
+  /* "Sent, awaiting the host's echo." A tap acknowledgement, kept deliberately
+     distinct from the live/pending looks above (which come from a snapshot,
+     i.e. the player actually acting): an accent ring plus a single outward
+     pulse says the command left the phone. It clears the instant the host next
+     speaks — see isSent() — so a normal round trip shows it only for a blink,
+     while a slow or dead link lets it linger, which is exactly the tell. */
+  .sent {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+    animation: sent-pulse 260ms ease-out;
+  }
+  .mini.sent {
+    outline-offset: -1px;
+    color: var(--accent);
+  }
+  @keyframes sent-pulse {
+    from {
+      box-shadow: 0 0 0 5px color-mix(in oklab, var(--accent) 55%, transparent);
+    }
+    to {
+      box-shadow: 0 0 0 0 transparent;
+    }
   }
 </style>

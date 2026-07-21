@@ -8,6 +8,7 @@
   import qrcode from 'qrcode-generator';
   import { remoteHost } from '../remote/remoteHost.svelte';
   import { randomSecret } from '../remote/protocol';
+  import IconClose from '~icons/bi/x-lg';
 
   /** Render a QR for `text` as a self-contained, scalable SVG string. */
   function qrSvg(text: string): string {
@@ -85,7 +86,7 @@
     <div class="panel" onclick={(e) => e.stopPropagation()}>
       <header>
         <strong>Phone remote</strong>
-        <button class="ghost" onclick={close} title="Close">✕</button>
+        <button class="ghost icon" onclick={close} title="Close"><IconClose /></button>
       </header>
 
       <div class="switch">
