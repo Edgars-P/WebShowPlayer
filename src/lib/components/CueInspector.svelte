@@ -44,11 +44,12 @@
     void app.reloadCueAudio(c);
   }
 
-  // endTime is nullable; edit through a text field.
-  function endTimeStr(c: AudioCue): string {
+  // endTime is nullable; edit through a text field. Shared by audio and video
+  // cues, which trim the same way.
+  function endTimeStr(c: { endTime: number | null }): string {
     return c.endTime == null ? '' : String(c.endTime);
   }
-  function setEndTime(c: AudioCue, v: string) {
+  function setEndTime(c: { endTime: number | null }, v: string) {
     const n = parseFloat(v);
     c.endTime = v.trim() === '' || Number.isNaN(n) ? null : n;
     app.markDirty();
@@ -247,6 +248,73 @@
                 <span class="hint">No video files in this project folder.</span>
               {/if}
             </div>
+            <div class="grid2">
+              <div class="field">
+                <label>
+                  Start (s)
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={c.startTime ?? 0}
+                    oninput={(e) => {
+                      c.startTime = parseFloat(e.currentTarget.value) || 0;
+                      app.markDirty();
+                    }}
+                  />
+                </label>
+              </div>
+              <div class="field">
+                <label>
+                  End (s, blank = end)
+                  <input value={endTimeStr(c)} oninput={(e) => setEndTime(c, e.currentTarget.value)} />
+                </label>
+              </div>
+            </div>
+            <div class="grid2">
+              <div class="field">
+                <label>
+                  Fade in (s)
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={c.fadeIn ?? 0}
+                    oninput={(e) => {
+                      c.fadeIn = parseFloat(e.currentTarget.value) || 0;
+                      app.markDirty();
+                    }}
+                  />
+                </label>
+              </div>
+              <div class="field">
+                <label>
+                  Fade out (s)
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={c.fadeOut ?? 0}
+                    oninput={(e) => {
+                      c.fadeOut = parseFloat(e.currentTarget.value) || 0;
+                      app.markDirty();
+                    }}
+                  />
+                </label>
+              </div>
+            </div>
+            <label class="check">
+              <input
+                type="checkbox"
+                checked={c.fadeOutOnEnd ?? false}
+                disabled={c.loop || (c.fadeOut ?? 0) <= 0}
+                onchange={(e) => {
+                  c.fadeOutOnEnd = e.currentTarget.checked;
+                  app.markDirty();
+                }}
+              />
+              Fade out at end too
+            </label>
             <div class="grid2">
               <label class="check">
                 <input type="checkbox" bind:checked={c.loop} onchange={() => app.markDirty()} /> Loop

@@ -118,6 +118,25 @@ export interface VideoCue extends BaseCue {
   action: VideoAction;
   /** Filename relative to the project folder; used when action is "play". */
   file: string;
+  /** Seconds into the file to start from. Absent (older saves) reads as 0. */
+  startTime: number;
+  /** Seconds into the file to stop at, or null for end-of-file. Absent (older
+   *  saves) reads as null. */
+  endTime: number | null;
+  /** Fade-in duration in seconds, ramping the clip's own audio track up from
+   *  silence. Absent (older saves) reads as 0. */
+  fadeIn: number;
+  /** Fade-out duration in seconds. Absent (older saves) reads as 0. */
+  fadeOut: number;
+  /**
+   * Also fade out when the clip reaches its own out point (end of file, or
+   * `endTime`), not just when it's manually taken off screen. The fade lands
+   * exactly on the out point. Ignored while looping, which never reaches an
+   * end. Absent (older saves) reads as false, preserving the previous
+   * hard-cut behaviour. Manually pausing or clearing the screen stays instant
+   * either way — only the clip's own natural end fades.
+   */
+  fadeOutOnEnd?: boolean;
   loop: boolean;
   /**
    * 0..1, applied to the clip's own audio track. Video plays through the screen
@@ -257,6 +276,11 @@ export function defaultVideoCue(row: number, col: number): VideoCue {
     color: '#0ea5e9',
     action: 'play',
     file: '',
+    startTime: 0,
+    endTime: null,
+    fadeIn: 0,
+    fadeOut: 0,
+    fadeOutOnEnd: false,
     loop: false,
     volume: 1,
     muted: false,

@@ -66,6 +66,14 @@ const CUE_FILES = {
       videoCue('v-clear', 4, { action: 'clear', file: '' }),
       videoCue('v-missing', 5, { file: 'nowhere.mp4' }),
       videoCue('v-hold', 6, { file: 'other.mp4', onStopBehavior: 'pause' }),
+      videoCue('v-trim', 7, {
+        file: 'other.mp4',
+        startTime: 5,
+        endTime: 20,
+        fadeIn: 1,
+        fadeOut: 2,
+        fadeOutOnEnd: true,
+      }),
     ]),
   ),
   'showB.wsp': JSON.stringify(showProject('b', [videoCue('v-b-play', 0, { file: 'other.mp4' })])),
@@ -136,6 +144,27 @@ describe('video cues', () => {
     expect(app.video.volume).toBe(0.5);
     expect(app.video.fit).toBe('cover');
     expect(app.videoActive).toBe(true);
+  });
+
+  it('carries trim and fade settings into the shared slot', async () => {
+    await fire(docA(), 'v-trim');
+
+    expect(app.video.startTime).toBe(5);
+    expect(app.video.endTime).toBe(20);
+    expect(app.video.fadeIn).toBe(1);
+    expect(app.video.fadeOut).toBe(2);
+    expect(app.video.fadeOutOnEnd).toBe(true);
+  });
+
+  it('defaults trim and fade settings for cues saved before they existed', async () => {
+    // v-play carries none of these fields at all, the way an older save would.
+    await fire(docA(), 'v-play');
+
+    expect(app.video.startTime).toBe(0);
+    expect(app.video.endTime).toBe(null);
+    expect(app.video.fadeIn).toBe(0);
+    expect(app.video.fadeOut).toBe(0);
+    expect(app.video.fadeOutOnEnd).toBe(false);
   });
 
   it('holds one slot globally: a second clip takes the screen over', async () => {

@@ -36,6 +36,17 @@ export interface VideoView {
   /** 0..1, the clip's own audio track. Independent of the Web Audio master. */
   volume: number;
   fit: VideoFit;
+  /** Seconds into the file to start from, and where the trimmed clip ends
+   *  (null = end of file). The page seeks here on load and treats reaching
+   *  the end point — not just the file's own end — as the clip being over. */
+  startTime: number;
+  endTime: number | null;
+  /** Fade-in duration in seconds, ramping up from `startTime`. */
+  fadeIn: number;
+  /** Fade-out duration in seconds, only applied per `fadeOutOnEnd`. */
+  fadeOut: number;
+  /** Fade out over `fadeOut` seconds as the clip reaches its own out point. */
+  fadeOutOnEnd: boolean;
   /**
    * Where the opener wants the clip moved to, in seconds.
    *
@@ -98,6 +109,11 @@ export const EMPTY_VIDEO: VideoView = {
   fit: 'contain',
   seekToken: 0,
   seekPosition: 0,
+  startTime: 0,
+  endTime: null,
+  fadeIn: 0,
+  fadeOut: 0,
+  fadeOutOnEnd: false,
 };
 
 const EMPTY_VIEW: ScreenView = { timer: EMPTY_TIMER, video: EMPTY_VIDEO };

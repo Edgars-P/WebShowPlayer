@@ -695,6 +695,11 @@ export class AppState implements ScreenHost {
     this.video.muted = req.muted;
     this.video.volume = req.volume;
     this.video.fit = req.fit;
+    this.video.startTime = req.startTime;
+    this.video.endTime = req.endTime;
+    this.video.fadeIn = req.fadeIn;
+    this.video.fadeOut = req.fadeOut;
+    this.video.fadeOutOnEnd = req.fadeOutOnEnd;
     this.videoCueId = req.cueId;
     // Nothing measured yet: the old clip's position must not leak into the new
     // cue's tile for the frame or two before the screen reports back.

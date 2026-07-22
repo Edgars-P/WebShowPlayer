@@ -2,7 +2,6 @@
   // The video half of the projector screen. Owns the media element, and with it
   // the only authoritative playback position — the opener sets intent (which
   // clip, playing or not) and hears back only when the clip reaches its end.
-  import { scale } from 'svelte/transition';
   import type { VideoStatus, VideoView } from './screen';
 
   let {
@@ -15,11 +14,15 @@
     onprogress: (generation: number, status: VideoStatus) => void;
   } = $props();
 
-  /** Matches the timer's float, so the two swap as one movement. */
-  const FLOAT_MS = 450;
-
   let el = $state<HTMLVideoElement | null>(null);
   let src = $state<string | null>(null);
+  /**
+   * The picture's own fade, 0..1 — driven every frame from the same clip-clock
+   * ramp that fades the audio (see the tick loop below), in place of a fixed
+   * mount/unmount transition. Set up front on load so a clip with a fade-in
+   * doesn't flash at full opacity for the frame before the first tick runs.
+   */
+  let opacity = $state(1);
   /**
    * Muting we imposed ourselves to get past the autoplay policy, as opposed to
    * the muting the cue asked for.
@@ -41,10 +44,14 @@
   let file = $derived(view.file);
   let generation = $derived(view.generation);
   let wantPlaying = $derived(view.playing);
-  let volume = $derived(view.volume);
-  let loop = $derived(view.loop);
   let seekToken = $derived(view.seekToken);
   let seekPosition = $derived(view.seekPosition);
+  let startTime = $derived(view.startTime);
+
+  /** Trimmed-in point past which loading a fresh clip should seek. */
+  function onLoadedMetadata() {
+    if (el && startTime > 0) el.currentTime = startTime;
+  }
 
   // One object URL per loaded clip. Keyed on `generation` as well as the File so
   // that re-firing the same clip mints a fresh URL and restarts it from zero,
@@ -54,6 +61,9 @@
     const clip = file;
     forcedMute = false;
     blocked = false;
+    // Start invisible if this clip eases in — the tick loop takes over from
+    // here the moment it runs, a frame later.
+    opacity = view.fadeIn > 0 ? 0 : 1;
     if (!clip) {
       src = null;
       return;
@@ -61,9 +71,10 @@
     const url = URL.createObjectURL(clip);
     src = url;
     return () => {
-      // Outlive the float-out: the element is still on screen and may still be
-      // streaming from this URL while it shrinks away.
-      setTimeout(() => URL.revokeObjectURL(url), FLOAT_MS + 500);
+      // No exit transition holds the element on screen anymore (the fade
+      // itself is what does that, while still mounted); a short buffer past
+      // this tick is still enough for the last frame's paint to land.
+      setTimeout(() => URL.revokeObjectURL(url), 200);
     };
   });
 
@@ -74,15 +85,6 @@
     if (!v || !src) return;
     if (wantPlaying) void play(v);
     else v.pause();
-  });
-
-  // Volume and loop are plain properties, not attributes, so they're pushed
-  // rather than bound. Re-applied on every change, including across clips.
-  $effect(() => {
-    const v = el;
-    if (!v) return;
-    v.volume = Math.min(1, Math.max(0, volume));
-    v.loop = loop;
   });
 
   /**
@@ -110,20 +112,78 @@
     v.currentTime = at;
   });
 
-  // Report the element's real state back while a clip is up. The opener is the
-  // authority on the show, but this window holds the only thing that knows where
-  // the clip actually is — so it feeds that back every frame, and the launchpad
-  // tile on the operator's screen reads live off it.
+  /**
+   * Volume, picture opacity, trim, and loop, driven straight off the element's
+   * own clock every frame — the same clock the position readout below already
+   * samples — rather than wall-clock timers. That makes fades naturally hold
+   * still while paused (currentTime isn't moving) and resume exactly where
+   * they left off, with no separate pause bookkeeping needed. It also folds
+   * the once-per-loaded-clip concern (fade in only the first pass, not every
+   * repeat) into a single counter alongside everything else this loop already
+   * tracks per clip.
+   *
+   * The picture fades in lockstep with the sound — one `fadeFactor`, applied
+   * to both — rather than the mount/unmount transition a fixed-duration pop
+   * used to give every clip regardless of its own settings. A cue with no
+   * fade configured now cuts instantly, sound and picture together, matching
+   * what an unfaded audio cue does.
+   *
+   * Reads `view.*` directly rather than through the `$derived`s above: those
+   * exist to gate *effects* (reloading the element, etc.) from firing on every
+   * push, but a plain read inside this callback always sees the latest value
+   * with no such concern.
+   *
+   * Report the element's real state back while a clip is up. The opener is the
+   * authority on the show, but this window holds the only thing that knows where
+   * the clip actually is — so it feeds that back every frame, and the launchpad
+   * tile on the operator's screen reads live off it.
+   */
   $effect(() => {
     const v = el;
     if (!v || !src) return;
     const clipGeneration = generation;
+    // How close to the out point counts as "there" — one frame's worth of
+    // native `timeupdate` jitter, not a hard equality check.
+    const EPS = 0.05;
+    let loopIndex = 0;
+    let endedFired = false;
     let raf = 0;
     let last: VideoStatus | null = null;
-    const report = () => {
+    const tick = () => {
+      const dur = Number.isFinite(v.duration) ? v.duration : 0;
+      const effectiveEnd = view.endTime ?? dur;
+      const t = v.currentTime;
+
+      if (dur > 0 && effectiveEnd > 0 && t >= effectiveEnd - EPS) {
+        if (view.loop) {
+          v.currentTime = view.startTime;
+          loopIndex++;
+        } else if (view.endTime != null && !endedFired && !v.paused) {
+          // Only an explicit trim ends the clip early; with no endTime this
+          // defers to the element's own `ended` event at the real end of file,
+          // unchanged from before trimming existed.
+          endedFired = true;
+          v.pause();
+          onended(clipGeneration);
+        }
+      }
+
+      let fadeFactor = 1;
+      if (loopIndex === 0 && view.fadeIn > 0) {
+        fadeFactor = Math.min(1, Math.max(0, (t - view.startTime) / view.fadeIn));
+      }
+      if (!view.loop && view.fadeOutOnEnd && view.fadeOut > 0 && effectiveEnd > 0) {
+        const toEnd = effectiveEnd - t;
+        if (toEnd < view.fadeOut) fadeFactor = Math.min(fadeFactor, Math.max(0, toEnd / view.fadeOut));
+      }
+      fadeFactor = Math.min(1, Math.max(0, fadeFactor));
+      const base = view.muted || forcedMute ? 0 : Math.min(1, Math.max(0, view.volume));
+      v.volume = base * fadeFactor;
+      opacity = fadeFactor;
+
       const status: VideoStatus = {
-        position: v.currentTime,
-        duration: Number.isFinite(v.duration) ? v.duration : 0,
+        position: t,
+        duration: dur,
         playing: !v.paused && !v.ended,
       };
       // A paused clip's readout doesn't change; skip the identical pushes rather
@@ -137,9 +197,9 @@
         last = status;
         onprogress(clipGeneration, status);
       }
-      raf = requestAnimationFrame(report);
+      raf = requestAnimationFrame(tick);
     };
-    raf = requestAnimationFrame(report);
+    raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
   });
 
@@ -173,19 +233,16 @@
 
 {#if src}
   <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
-  <div
-    class="stage"
-    onclick={unblock}
-    in:scale={{ duration: FLOAT_MS, start: 0.7 }}
-    out:scale={{ duration: FLOAT_MS, start: 0.7 }}
-  >
+  <div class="stage" onclick={unblock}>
     <!-- svelte-ignore a11y_media_has_caption -->
     <video
       bind:this={el}
       {src}
       style:object-fit={view.fit}
+      style:opacity={opacity}
       muted={view.muted || forcedMute}
       playsinline
+      onloadedmetadata={onLoadedMetadata}
       onended={() => onended(view.generation)}
     ></video>
     {#if blocked}

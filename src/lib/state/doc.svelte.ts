@@ -74,6 +74,11 @@ export interface VideoRequest {
   muted: boolean;
   volume: number;
   fit: VideoFit;
+  startTime: number;
+  endTime: number | null;
+  fadeIn: number;
+  fadeOut: number;
+  fadeOutOnEnd: boolean;
 }
 
 /**
@@ -598,6 +603,13 @@ export class Doc {
         muted: cue.muted,
         volume: cue.volume,
         fit: cue.fit,
+        // `?? default` rather than trusting the type: cues saved before these
+        // settings existed have none of these fields at all.
+        startTime: cue.startTime ?? 0,
+        endTime: cue.endTime ?? null,
+        fadeIn: cue.fadeIn ?? 0,
+        fadeOut: cue.fadeOut ?? 0,
+        fadeOutOnEnd: cue.fadeOutOnEnd ?? false,
       });
     } catch (err) {
       this.host.reportError(err instanceof Error ? err.message : String(err));
