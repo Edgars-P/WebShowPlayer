@@ -3,10 +3,18 @@
   // transport bar and an always-visible panic bar up top, a tab strip, and the
   // active tab's cues as a full-width vertical stack. Everything it shows comes
   // from the host's snapshot; every tap sends a whitelisted command back.
+  //
+  // Taps are optimistic: `predicted` folds every outstanding command's
+  // locally-predicted effect on top of the last snapshot the host sent, so a
+  // tap looks like it already happened instantly, with no "sent, waiting"
+  // indicator for the common fast case. See `optimistic.ts` for exactly what
+  // gets predicted and why (only the tapped control's own field, never a
+  // neighbouring cue or a trigger chain).
 
   import { onMount } from 'svelte';
   import { remoteClient } from './remoteClient.svelte';
   import { formatTime } from '../timer/timer';
+  import { predictSnapshot } from './optimistic';
   import type { RemoteCommand } from './protocol';
   import IconPlayFill from '~icons/bi/play-fill';
   import IconPauseFill from '~icons/bi/pause-fill';
@@ -31,49 +39,129 @@
     globalOne: IconGlobalOne,
   };
 
-  onMount(() => remoteClient.start());
-
   let snap = $derived(remoteClient.snapshot);
   let status = $derived(remoteClient.status);
   let stale = $derived(remoteClient.stale);
 
   // Which tab the phone is *viewing*. Null means "follow the player"; tapping a
   // tab pins the view locally so browsing here never moves the operator's tab.
+  // Always driven by the real snapshot, never predicted — tab browsing is
+  // local-only and no command for it is ever sent.
   let localTab = $state<string | null>(null);
   let viewTabId = $derived(localTab ?? snap?.activeTabId ?? snap?.tabs[0]?.id ?? '');
-  let tab = $derived(snap?.tabs.find((t) => t.id === viewTabId) ?? snap?.tabs[0] ?? null);
 
-  function send(cmd: RemoteCommand) {
-    remoteClient.send(cmd);
+  // ---- Optimistic prediction queue ------------------------------------------
+
+  type Pending = { id: string; cmd: RemoteCommand; at: number };
+
+  /** Safety net: revert to the authoritative snapshot if an ack/mismatch never
+   *  arrives for a command (a dropped packet, a link that died mid-flight). */
+  const PREDICTION_TIMEOUT_MS = 2500;
+  /** A command outstanding longer than this gets a subtle "still confirming"
+   *  hint — the common fast round trip never reaches it. */
+  const SLOW_ACK_MS = 700;
+  const QUEUE_TICK_MS = 300;
+
+  let queue = $state<Pending[]>([]);
+  let clockNow = $state(Date.now());
+
+  /** The latest authoritative snapshot with every still-outstanding predicted
+   *  command replayed on top, in send order. Depends only on `snap`/`queue` —
+   *  never `clockNow` — so it doesn't recompute on every tick. */
+  let predicted = $derived.by(() => {
+    if (!snap) return null;
+    let s = snap;
+    for (const p of queue) s = predictSnapshot(s, p.cmd) ?? s;
+    return s;
+  });
+  let tab = $derived(predicted?.tabs.find((t) => t.id === viewTabId) ?? predicted?.tabs[0] ?? null);
+
+  function dispatch(cmd: RemoteCommand) {
+    const id = remoteClient.send(cmd);
+    if (id) queue = [...queue, { id, cmd, at: Date.now() }];
   }
 
-  // Instant tap acknowledgement. The moment a command leaves the phone we mark
-  // its control "sent" and remember the snapshot revision it went out on; the
-  // control keeps that look until the host next speaks (rev advances) — its
-  // response — or a short cap elapses, whichever comes first. This is
-  // deliberately separate from the snapshot-driven live/pending styling below:
-  // it reports the phone→host leg (your tap registered and was sent), not that
-  // the player has actually done the thing yet.
-  const SENT_CAP_MS = 1200;
-  let sentRev = $state<Record<string, number>>({});
+  /**
+   * activateCue needs the phone's current best guess of the cue's state, sent
+   * along as `fromState` so the host can tell us whether that guess was
+   * already stale by the time it processed the tap (see optimistic.ts's
+   * header comment on AudioEngine.toggle()'s state-dependent branches).
+   */
+  function dispatchActivateCue(cueId: string) {
+    const fromState = tab?.cues.find((c) => c.id === cueId)?.state ?? 'idle';
+    dispatch({ t: 'activateCue', cueId, fromState });
+  }
 
-  function fire(key: string, cmd: RemoteCommand) {
-    if (!remoteClient.send(cmd)) return; // nothing to acknowledge if it didn't go
-    const rev = remoteClient.rev;
-    sentRev = { ...sentRev, [key]: rev };
-    setTimeout(() => {
-      if (sentRev[key] === rev) {
-        const { [key]: _drop, ...rest } = sentRev;
-        sentRev = rest;
+  /**
+   * The control-key a command's slow-ack hint should key off, mirroring the
+   * button layout below — pause and resume share one button, same for video.
+   */
+  function controlKey(cmd: RemoteCommand): string {
+    switch (cmd.t) {
+      case 'activateCue':
+        return `cue-${cmd.cueId}`;
+      case 'selectDoc':
+        return `doc-${cmd.docId}`;
+      case 'openScreen':
+        return 'screen';
+      case 'timerPause':
+      case 'timerResume':
+        return 'timer-play';
+      case 'timerClear':
+        return 'timer-clear';
+      case 'videoPause':
+      case 'videoResume':
+        return 'video-play';
+      case 'videoClear':
+        return 'video-clear';
+      case 'stopAll':
+        return cmd.fade ? 'fade-all' : 'stop-all';
+      default:
+        return '';
+    }
+  }
+
+  /** Commands outstanding long enough to show the subtle "still confirming"
+   *  hint. Depends on `clockNow` (so it re-evaluates every tick) but never
+   *  writes to `queue`/`predicted` itself. */
+  let slowKeys = $derived.by(() => {
+    const keys = new Set<string>();
+    for (const p of queue) if (clockNow - p.at > SLOW_ACK_MS) keys.add(controlKey(p.cmd));
+    return keys;
+  });
+
+  onMount(() => {
+    remoteClient.start();
+    const timer = setInterval(() => {
+      clockNow = Date.now();
+      if (queue.length && queue.some((p) => clockNow - p.at > PREDICTION_TIMEOUT_MS)) {
+        queue = queue.filter((p) => clockNow - p.at <= PREDICTION_TIMEOUT_MS);
       }
-    }, SENT_CAP_MS);
-  }
+    }, QUEUE_TICK_MS);
+    return () => clearInterval(timer);
+  });
 
-  // A control still awaiting the host's echo: sent, and no snapshot has landed
-  // since. Once rev moves past the value we recorded, the acknowledgement clears.
-  function isSent(key: string): boolean {
-    return sentRev[key] !== undefined && sentRev[key] === remoteClient.rev;
-  }
+  // Drop a queued prediction once the host confirms it landed as expected.
+  $effect(() => {
+    const acked = remoteClient.ackedIds;
+    if (queue.some((p) => acked.has(p.id))) queue = queue.filter((p) => !acked.has(p.id));
+  });
+
+  // A mismatch means our model of "the last known state" was already stale
+  // when the host processed one of our commands — any other still-queued
+  // prediction from around the same window may be compounding on the same bad
+  // assumption, so the safe response is to fall back entirely to the bundled
+  // authoritative snapshot rather than trust the rest of the queue. Normal
+  // single-tap use never reaches this; it's a rapid-double-tap-on-a-slow-link
+  // safeguard.
+  $effect(() => {
+    if (remoteClient.mismatchedIds.size && queue.length) queue = [];
+  });
+
+  // A disconnect invalidates every outstanding prediction.
+  $effect(() => {
+    if (status !== 'connected' && queue.length) queue = [];
+  });
 
   let statusText = $derived(
     stale && status === 'connected'
@@ -96,55 +184,55 @@
   >
     <span class="dot"></span>
     <span>{statusText}</span>
-    {#if snap}<span class="doc">{snap.docs.find((d) => d.id === snap.activeDocId)?.title ?? ''}</span>{/if}
+    {#if predicted}<span class="doc">{predicted.docs.find((d) => d.id === predicted.activeDocId)?.title ?? ''}</span>{/if}
   </div>
 
   {#if status === 'error'}
     <div class="fatal">{remoteClient.error}</div>
-  {:else if !snap}
+  {:else if !predicted}
     <div class="empty">Waiting for the player…</div>
   {:else}
     <!-- Transport bar: screen / timer / video, mirroring the desktop toolbar. -->
     <div class="topbar">
       <button
         class="chip"
-        class:on={snap.screenLive}
-        class:sent={isSent('screen')}
-        onclick={() => fire('screen', { t: 'openScreen' })}
+        class:on={predicted.screenLive}
+        class:pending-ack={slowKeys.has('screen')}
+        onclick={() => dispatch({ t: 'openScreen' })}
         title="Open the projector screen on the player"
       >
-        Screen {#if snap.screenLive}<IconCircleFill />{:else}<IconCircle />{/if}
+        Screen {#if predicted.screenLive}<IconCircleFill />{:else}<IconCircle />{/if}
       </button>
 
-      <div class="chip group" class:live={snap.timer.active}>
-        <span class="clock">{snap.timer.active ? formatTime(snap.timer.remaining) : '—:—'}</span>
+      <div class="chip group" class:live={predicted.timer.active}>
+        <span class="clock">{predicted.timer.active ? formatTime(predicted.timer.remaining) : '—:—'}</span>
         <button
           class="mini"
-          class:sent={isSent('timer-play')}
-          disabled={!snap.timer.active || snap.timer.finished}
-          onclick={() => fire('timer-play', snap.timer.running ? { t: 'timerPause' } : { t: 'timerResume' })}
-        >{#if snap.timer.running}<IconPauseFill />{:else}<IconPlayFill />{/if}</button>
+          class:pending-ack={slowKeys.has('timer-play')}
+          disabled={!predicted.timer.active || predicted.timer.finished}
+          onclick={() => dispatch(predicted.timer.running ? { t: 'timerPause' } : { t: 'timerResume' })}
+        >{#if predicted.timer.running}<IconPauseFill />{:else}<IconPlayFill />{/if}</button>
         <button
           class="mini"
-          class:sent={isSent('timer-clear')}
-          disabled={!snap.timer.active}
-          onclick={() => fire('timer-clear', { t: 'timerClear' })}
+          class:pending-ack={slowKeys.has('timer-clear')}
+          disabled={!predicted.timer.active}
+          onclick={() => dispatch({ t: 'timerClear' })}
         ><IconStopFill /></button>
       </div>
 
-      <div class="chip group" class:live={snap.video.active}>
-        <span class="clock">{#if snap.video.active}{formatTime(snap.video.remaining)}{:else}<IconBlank />{/if}</span>
+      <div class="chip group" class:live={predicted.video.active}>
+        <span class="clock">{#if predicted.video.active}{formatTime(predicted.video.remaining)}{:else}<IconBlank />{/if}</span>
         <button
           class="mini"
-          class:sent={isSent('video-play')}
-          disabled={!snap.video.active}
-          onclick={() => fire('video-play', snap.video.playing ? { t: 'videoPause' } : { t: 'videoResume' })}
-        >{#if snap.video.playing}<IconPauseFill />{:else}<IconPlayFill />{/if}</button>
+          class:pending-ack={slowKeys.has('video-play')}
+          disabled={!predicted.video.active}
+          onclick={() => dispatch(predicted.video.playing ? { t: 'videoPause' } : { t: 'videoResume' })}
+        >{#if predicted.video.playing}<IconPauseFill />{:else}<IconPlayFill />{/if}</button>
         <button
           class="mini"
-          class:sent={isSent('video-clear')}
-          disabled={!snap.video.active}
-          onclick={() => fire('video-clear', { t: 'videoClear' })}
+          class:pending-ack={slowKeys.has('video-clear')}
+          disabled={!predicted.video.active}
+          onclick={() => dispatch({ t: 'videoClear' })}
         ><IconStopFill /></button>
       </div>
     </div>
@@ -153,30 +241,30 @@
     <div class="panic">
       <button
         class="fade"
-        class:sent={isSent('fade-all')}
-        disabled={!snap.anyPlaying}
-        onclick={() => fire('fade-all', { t: 'stopAll', fade: true })}
+        class:pending-ack={slowKeys.has('fade-all')}
+        disabled={!predicted.anyPlaying}
+        onclick={() => dispatch({ t: 'stopAll', fade: true })}
       >
         Fade all
       </button>
       <button
         class="stop"
-        class:sent={isSent('stop-all')}
-        disabled={!snap.anyPlaying}
-        onclick={() => fire('stop-all', { t: 'stopAll', fade: false })}
+        class:pending-ack={slowKeys.has('stop-all')}
+        disabled={!predicted.anyPlaying}
+        onclick={() => dispatch({ t: 'stopAll', fade: false })}
       >
         <IconStopFill /> Stop all
       </button>
     </div>
 
-    {#if snap.docs.length > 1}
+    {#if predicted.docs.length > 1}
       <div class="docs">
-        {#each snap.docs as d (d.id)}
+        {#each predicted.docs as d (d.id)}
           <button
             class="docbtn"
-            class:active={d.id === snap.activeDocId}
-            class:sent={isSent(`doc-${d.id}`)}
-            onclick={() => fire(`doc-${d.id}`, { t: 'selectDoc', docId: d.id })}
+            class:active={d.id === predicted.activeDocId}
+            class:pending-ack={slowKeys.has(`doc-${d.id}`)}
+            onclick={() => dispatch({ t: 'selectDoc', docId: d.id })}
           >
             {d.title}
           </button>
@@ -186,9 +274,9 @@
 
     <!-- Tab strip: browsing here is local; a dot marks the player's live tab. -->
     <div class="tabs">
-      {#each snap.tabs as t (t.id)}
+      {#each snap!.tabs as t (t.id)}
         <button class="tabbtn" class:active={t.id === viewTabId} onclick={() => (localTab = t.id)}>
-          {t.name}{#if t.id === snap.activeTabId}<span class="livedot" title="Live on the player"><IconCircleFill /></span>{/if}
+          {t.name}{#if t.id === snap!.activeTabId}<span class="livedot" title="Live on the player"><IconCircleFill /></span>{/if}
         </button>
       {/each}
     </div>
@@ -203,10 +291,10 @@
             class:missing={cue.missing}
             class:pending={cue.pending}
             class:unavailable={cue.unavailable}
-            class:sent={isSent(`cue-${cue.id}`)}
+            class:pending-ack={slowKeys.has(`cue-${cue.id}`)}
             style:--cue-color={cue.color}
             disabled={cue.unavailable}
-            onclick={() => fire(`cue-${cue.id}`, { t: 'activateCue', cueId: cue.id })}
+            onclick={() => dispatchActivateCue(cue.id)}
           >
             <span class="swatch"></span>
             <span class="labels">
@@ -498,27 +586,15 @@
     opacity: 0.6;
   }
 
-  /* "Sent, awaiting the host's echo." A tap acknowledgement, kept deliberately
-     distinct from the live/pending looks above (which come from a snapshot,
-     i.e. the player actually acting): an accent ring plus a single outward
-     pulse says the command left the phone. It clears the instant the host next
-     speaks — see isSent() — so a normal round trip shows it only for a blink,
-     while a slow or dead link lets it linger, which is exactly the tell. */
-  .sent {
-    outline: 2px solid var(--accent);
-    outline-offset: -2px;
-    animation: sent-pulse 260ms ease-out;
+  /* A command still hasn't been confirmed after a while — not the fast common
+     case (which shows nothing beyond the instant predicted state change), but
+     long enough that the operator might wonder if the tap registered. No
+     animation: a static, subtle dim signals "still working on it" without
+     nagging like the old ring-pulse did. */
+  .pending-ack {
+    opacity: 0.7;
   }
-  .mini.sent {
-    outline-offset: -1px;
-    color: var(--accent);
-  }
-  @keyframes sent-pulse {
-    from {
-      box-shadow: 0 0 0 5px color-mix(in oklab, var(--accent) 55%, transparent);
-    }
-    to {
-      box-shadow: 0 0 0 0 transparent;
-    }
+  .mini.pending-ack {
+    opacity: 0.55;
   }
 </style>

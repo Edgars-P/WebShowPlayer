@@ -33,6 +33,17 @@
   }
 
   /**
+   * Fade-in/out durations the phone needs to predict whether tapping a cue
+   * lands on fadingIn/fadingOut or snaps straight to playing/idle (see
+   * optimistic.ts). Only audio cues (direct, or via a proxy) have a fade.
+   */
+  function fadeTimes(cue: Cue): { fadeInSec: number; fadeOutSec: number } {
+    const target = cue.type === 'proxy' ? app.resolveProxy(cue) : cue;
+    if (target && target.type === 'audio') return { fadeInSec: target.fadeIn, fadeOutSec: target.fadeOut };
+    return { fadeInSec: 0, fadeOutSec: 0 };
+  }
+
+  /**
    * The cue's second line, mirroring CueButton.subtitle: a live cue shows its
    * remaining time, an idle one shows what kind of cue it is. The icon is sent
    * as a key, not a glyph — the phone picks its own icon for it, same as the
@@ -105,6 +116,7 @@
             cues: tab.cues.map((cue): RemoteCue => {
               const info = app.display(cue);
               const sub = subtitleFor(cue, info);
+              const fade = fadeTimes(cue);
               return {
                 id: cue.id,
                 name: info.name,
@@ -117,6 +129,8 @@
                 subtitleIcon: sub.icon,
                 row: cue.row,
                 col: cue.col,
+                fadeInSec: fade.fadeInSec,
+                fadeOutSec: fade.fadeOutSec,
               };
             }),
           }))

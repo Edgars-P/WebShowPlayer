@@ -130,14 +130,71 @@ describe('RemoteClient reconnect', () => {
     expect(client.status).toBe('reconnecting');
   });
 
-  it('sends commands as cmd frames on the open socket', () => {
+  it('sends commands as cmd frames on the open socket, returning the generated id', () => {
     const client = new RemoteClient();
     client.start();
     const s1 = FakeWebSocket.instances[0];
     s1.open();
 
-    client.send({ t: 'stopAll', fade: false });
+    const id = client.send({ t: 'stopAll', fade: false });
     expect(s1.sent).toHaveLength(1);
-    expect(JSON.parse(s1.sent[0])).toEqual({ k: 'cmd', d: { t: 'stopAll', fade: false } });
+    const parsed = JSON.parse(s1.sent[0]);
+    expect(parsed).toMatchObject({ k: 'cmd', d: { t: 'stopAll', fade: false } });
+    expect(typeof parsed.id).toBe('string');
+    expect(parsed.id).toBe(id);
+  });
+});
+
+describe('RemoteClient acks', () => {
+  beforeEach(() => {
+    FakeWebSocket.instances.length = 0;
+    vi.useFakeTimers();
+    (globalThis as unknown as { WebSocket: unknown }).WebSocket = FakeWebSocket;
+    (globalThis as unknown as { location: unknown }).location = {
+      hash: '#room=room1&key=derivedkey',
+      protocol: 'https:',
+      host: 'player.example',
+    };
+    (globalThis as unknown as { window: unknown }).window = { addEventListener: vi.fn() };
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("collects acked ids from a state frame's ack array", () => {
+    const client = new RemoteClient();
+    client.start();
+    const s1 = FakeWebSocket.instances[0];
+    s1.open();
+    s1.message({ ...stateFrame(), ack: ['id-1', 'id-2'] });
+    expect(client.ackedIds.has('id-1')).toBe(true);
+    expect(client.ackedIds.has('id-2')).toBe(true);
+    expect(client.mismatchedIds.size).toBe(0);
+  });
+
+  it("collects mismatched ids from a state frame's mismatch array, independently of ack", () => {
+    const client = new RemoteClient();
+    client.start();
+    const s1 = FakeWebSocket.instances[0];
+    s1.open();
+    s1.message({ ...stateFrame(), ack: ['ok-1'], mismatch: ['bad-1'] });
+    expect(client.ackedIds.has('ok-1')).toBe(true);
+    expect(client.mismatchedIds.has('bad-1')).toBe(true);
+    expect(client.ackedIds.has('bad-1')).toBe(false);
+    expect(client.mismatchedIds.has('ok-1')).toBe(false);
+  });
+
+  it('ignores a non-array or non-string ack/mismatch payload', () => {
+    const client = new RemoteClient();
+    client.start();
+    const s1 = FakeWebSocket.instances[0];
+    s1.open();
+    s1.message({ ...stateFrame(), ack: 'not-an-array', mismatch: 'not-an-array' });
+    expect(client.ackedIds.size).toBe(0);
+    expect(client.mismatchedIds.size).toBe(0);
+    s1.message({ ...stateFrame(), ack: [123, null, 'ok'] });
+    expect(client.ackedIds.has('ok')).toBe(true);
+    expect(client.ackedIds.size).toBe(1);
   });
 });

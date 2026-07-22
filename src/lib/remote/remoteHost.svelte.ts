@@ -100,6 +100,10 @@ export class RemoteHost {
   private reconnectTimer = 0;
   /** Bumps every (re)connect so a superseded socket's late events are ignored. */
   private epoch = 0;
+  /** Command ids applied since the last flushed `state` frame, split by
+   *  whether the sender's claimed starting state matched reality. */
+  private pendingAcks: string[] = [];
+  private pendingMismatches: string[] = [];
 
   /**
    * The whitelist mapped onto `app`. Every one of these is an existing method —
@@ -109,9 +113,12 @@ export class RemoteHost {
    * exactly as a click would.
    */
   private actions: RemoteHostActions = {
-    activateCue: (id) => {
+    activateCue: (id, fromState) => {
       const cue = app.activeDoc?.findCue(id);
-      if (cue) app.activate(cue);
+      if (!cue) return false; // nothing to compare against, and no toggle happens
+      const actualState = app.display(cue).state;
+      app.activate(cue);
+      return actualState === fromState;
     },
     setTab: (id) => {
       app.activeTabId = id;
@@ -283,7 +290,10 @@ export class RemoteHost {
       if (msg.n > 0 && this.lastSnapshot) this.flush();
     } else if (msg.k === 'cmd') {
       // Untrusted: parseCommand inside applyCommand is the gate.
-      applyCommand(this.actions, msg.d);
+      const result = applyCommand(this.actions, msg.d);
+      if (result.valid && typeof msg.id === 'string') {
+        (result.matched ? this.pendingAcks : this.pendingMismatches).push(msg.id);
+      }
     }
   }
 
@@ -379,7 +389,14 @@ export class RemoteHost {
     }
     if (!this.isOpen() || !this.lastSnapshot || this.peerCount === 0) return;
     this.lastSentAt = Date.now();
-    const frame: HostFrame = { k: 'state', d: this.lastSnapshot };
+    const frame: HostFrame = {
+      k: 'state',
+      d: this.lastSnapshot,
+      ack: this.pendingAcks.length ? this.pendingAcks : undefined,
+      mismatch: this.pendingMismatches.length ? this.pendingMismatches : undefined,
+    };
+    this.pendingAcks = [];
+    this.pendingMismatches = [];
     try {
       this.socket!.send(JSON.stringify(frame));
     } catch {

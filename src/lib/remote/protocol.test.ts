@@ -22,6 +22,8 @@ function cue(over: Partial<RemoteCue> & { id: string; row: number; col: number }
     unavailable: false,
     subtitle: '',
     subtitleIcon: null,
+    fadeInSec: 0,
+    fadeOutSec: 0,
     ...over,
   };
 }
@@ -121,13 +123,19 @@ describe('buildSnapshot', () => {
       unavailable: false,
       subtitle: '−1:00',
       subtitleIcon: null,
+      fadeInSec: 0,
+      fadeOutSec: 0,
     });
   });
 });
 
 describe('parseCommand', () => {
   it('accepts each whitelisted command with valid fields', () => {
-    expect(parseCommand({ t: 'activateCue', cueId: 'x' })).toEqual({ t: 'activateCue', cueId: 'x' });
+    expect(parseCommand({ t: 'activateCue', cueId: 'x', fromState: 'idle' })).toEqual({
+      t: 'activateCue',
+      cueId: 'x',
+      fromState: 'idle',
+    });
     expect(parseCommand({ t: 'setTab', tabId: 't' })).toEqual({ t: 'setTab', tabId: 't' });
     expect(parseCommand({ t: 'selectDoc', docId: 'd' })).toEqual({ t: 'selectDoc', docId: 'd' });
     expect(parseCommand({ t: 'stopAll', fade: true })).toEqual({ t: 'stopAll', fade: true });
@@ -136,13 +144,25 @@ describe('parseCommand', () => {
     expect(parseCommand({ t: 'setMaster', value: 0.5 })).toEqual({ t: 'setMaster', value: 0.5 });
   });
 
+  it('accepts every valid fromState value on activateCue', () => {
+    for (const fromState of ['idle', 'fadingIn', 'playing', 'fadingOut']) {
+      expect(parseCommand({ t: 'activateCue', cueId: 'x', fromState })).toEqual({
+        t: 'activateCue',
+        cueId: 'x',
+        fromState,
+      });
+    }
+  });
+
   it('rejects unknown, malformed, or wrongly-typed messages', () => {
     expect(parseCommand(null)).toBeNull();
     expect(parseCommand('activateCue')).toBeNull();
     expect(parseCommand({})).toBeNull();
     expect(parseCommand({ t: 'nope' })).toBeNull();
-    expect(parseCommand({ t: 'activateCue' })).toBeNull(); // missing cueId
-    expect(parseCommand({ t: 'activateCue', cueId: 42 })).toBeNull();
+    expect(parseCommand({ t: 'activateCue' })).toBeNull(); // missing cueId/fromState
+    expect(parseCommand({ t: 'activateCue', cueId: 42, fromState: 'idle' })).toBeNull();
+    expect(parseCommand({ t: 'activateCue', cueId: 'x' })).toBeNull(); // missing fromState
+    expect(parseCommand({ t: 'activateCue', cueId: 'x', fromState: 'nope' })).toBeNull(); // invalid fromState
     expect(parseCommand({ t: 'stopAll', fade: 'yes' })).toBeNull();
     expect(parseCommand({ t: 'setMaster', value: 2 })).toBeNull(); // out of range
     expect(parseCommand({ t: 'setMaster', value: -0.1 })).toBeNull();
@@ -152,11 +172,14 @@ describe('parseCommand', () => {
 });
 
 describe('applyCommand', () => {
-  function stub(): RemoteHostActions & { calls: [string, unknown?][] } {
-    const calls: [string, unknown?][] = [];
+  function stub(activateCueMatches = true): RemoteHostActions & { calls: [string, unknown?, unknown?][] } {
+    const calls: [string, unknown?, unknown?][] = [];
     return {
       calls,
-      activateCue: (id) => calls.push(['activateCue', id]),
+      activateCue: (id, fromState) => {
+        calls.push(['activateCue', id, fromState]);
+        return activateCueMatches;
+      },
       setTab: (id) => calls.push(['setTab', id]),
       selectDoc: (id) => calls.push(['selectDoc', id]),
       stopAll: (fade) => calls.push(['stopAll', fade]),
@@ -173,13 +196,16 @@ describe('applyCommand', () => {
 
   it('routes each command to its matching action', () => {
     const host = stub();
-    expect(applyCommand(host, { t: 'activateCue', cueId: 'c1' })).toBe(true);
-    expect(applyCommand(host, { t: 'setTab', tabId: 't2' })).toBe(true);
-    expect(applyCommand(host, { t: 'stopAll', fade: false })).toBe(true);
-    expect(applyCommand(host, { t: 'timerClear' })).toBe(true);
-    expect(applyCommand(host, { t: 'setMaster', value: 0.25 })).toBe(true);
+    expect(applyCommand(host, { t: 'activateCue', cueId: 'c1', fromState: 'idle' })).toEqual({
+      valid: true,
+      matched: true,
+    });
+    expect(applyCommand(host, { t: 'setTab', tabId: 't2' })).toEqual({ valid: true, matched: true });
+    expect(applyCommand(host, { t: 'stopAll', fade: false })).toEqual({ valid: true, matched: true });
+    expect(applyCommand(host, { t: 'timerClear' })).toEqual({ valid: true, matched: true });
+    expect(applyCommand(host, { t: 'setMaster', value: 0.25 })).toEqual({ valid: true, matched: true });
     expect(host.calls).toEqual([
-      ['activateCue', 'c1'],
+      ['activateCue', 'c1', 'idle'],
       ['setTab', 't2'],
       ['stopAll', false],
       ['timerClear'],
@@ -187,10 +213,18 @@ describe('applyCommand', () => {
     ]);
   });
 
+  it("reports activateCue's matched result, true or false, based on the host's answer", () => {
+    expect(applyCommand(stub(true), { t: 'activateCue', cueId: 'c1', fromState: 'idle' }).matched).toBe(true);
+    expect(applyCommand(stub(false), { t: 'activateCue', cueId: 'c1', fromState: 'idle' }).matched).toBe(false);
+  });
+
   it('rejects and does not dispatch an invalid command', () => {
     const host = stub();
-    expect(applyCommand(host, { t: 'save' })).toBe(false);
-    expect(applyCommand(host, { t: 'activateCue', cueId: 99 })).toBe(false);
+    expect(applyCommand(host, { t: 'save' })).toEqual({ valid: false, matched: true });
+    expect(applyCommand(host, { t: 'activateCue', cueId: 99, fromState: 'idle' })).toEqual({
+      valid: false,
+      matched: true,
+    });
     expect(host.calls).toEqual([]);
   });
 });

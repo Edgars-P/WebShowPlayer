@@ -28,6 +28,12 @@ const RECONNECT_MS = 2000;
  */
 const STALE_MS = 9000;
 
+/** Drop a learned ack/mismatch id after this long so the tracking maps don't
+ *  grow unboundedly over a long session. Generous compared to how briefly
+ *  RemotePage actually needs one (its own prediction queue expires in a few
+ *  seconds), just to stay well clear of any legitimate delay. */
+const ACK_TTL_MS = 10000;
+
 export class RemoteClient {
   status = $state<ClientStatus>('connecting');
   /** The most recent state the host pushed, or null before the first arrives. */
@@ -41,6 +47,14 @@ export class RemoteClient {
   /** True when connected but no snapshot has arrived for a while (frozen link). */
   stale = $state(false);
   error = $state('');
+  /** Ids of commands the host has applied and confirmed matched the state the
+   *  phone claimed when it sent them. Reassigned (never mutated in place) on
+   *  every update so Svelte's reactivity picks up the change. */
+  ackedIds = $state<Set<string>>(new Set());
+  /** Ids of commands the host applied but whose claimed starting state (see
+   *  `activateCue`'s `fromState`) didn't match reality — the phone's own
+   *  prediction of the outcome can't be trusted. */
+  mismatchedIds = $state<Set<string>>(new Set());
 
   private socket: WebSocket | null = null;
   private roomId = '';
@@ -51,6 +65,9 @@ export class RemoteClient {
   private started = false;
   /** Bumps every (re)connect so a superseded socket's late events are ignored. */
   private epoch = 0;
+  /** When each id in `ackedIds`/`mismatchedIds` was learned, for TTL pruning. */
+  private ackedAt = new Map<string, number>();
+  private mismatchedAt = new Map<string, number>();
 
   /** Read the fragment and connect. Fails loudly if the link has no pairing code. */
   start(): void {
@@ -146,7 +163,24 @@ export class RemoteClient {
       this.status = 'connected';
       this.lastSnapshotAt = Date.now();
       this.stale = false;
+      if (Array.isArray(msg.ack)) this.ackedIds = this.mergeIds(msg.ack, this.ackedAt);
+      if (Array.isArray(msg.mismatch)) this.mismatchedIds = this.mergeIds(msg.mismatch, this.mismatchedAt);
     }
+  }
+
+  /** Merge validated string ids from an inbound array into `at` (pruning
+   *  entries past `ACK_TTL_MS`) and return a fresh Set reflecting it — a new
+   *  instance every time, since a `$state<Set<...>>` needs reassignment, not
+   *  in-place mutation, for Svelte to notice the change. */
+  private mergeIds(raw: unknown[], at: Map<string, number>): Set<string> {
+    const now = Date.now();
+    for (const id of raw) {
+      if (typeof id === 'string') at.set(id, now);
+    }
+    for (const [id, seenAt] of at) {
+      if (now - seenAt > ACK_TTL_MS) at.delete(id);
+    }
+    return new Set(at.keys());
   }
 
   private scheduleReconnect(): void {
@@ -158,19 +192,22 @@ export class RemoteClient {
   }
 
   /**
-   * Fire a command at the host. No-op until the socket is open. Returns whether
-   * the command actually left the phone, so the UI only acknowledges taps that
-   * were really sent.
+   * Fire a command at the host with a fresh id, so a later `state` frame's
+   * `ack`/`mismatch` can refer back to it. No-op until the socket is open.
+   * Returns the id if the command actually left the phone, or null if it
+   * didn't — the caller only tracks a prediction for a command that was
+   * really sent.
    */
-  send(cmd: RemoteCommand): boolean {
-    if (this.socket?.readyState !== WebSocket.OPEN) return false;
-    const frame: ControllerFrame = { k: 'cmd', d: cmd };
+  send(cmd: RemoteCommand): string | null {
+    if (this.socket?.readyState !== WebSocket.OPEN) return null;
+    const id = crypto.randomUUID();
+    const frame: ControllerFrame = { k: 'cmd', id, d: cmd };
     try {
       this.socket.send(JSON.stringify(frame));
-      return true;
+      return id;
     } catch {
       // A failing send means the socket is closing; the reconnect path handles it.
-      return false;
+      return null;
     }
   }
 

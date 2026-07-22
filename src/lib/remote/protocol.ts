@@ -41,6 +41,14 @@ export interface RemoteCue {
   subtitleIcon: SubtitleIcon;
   row: number;
   col: number;
+  /**
+   * Fade-in/out duration in seconds (0 for cues with no fade concept, or a
+   * proxy resolving to a non-audio target). The phone needs these to predict
+   * whether tapping a cue lands on `fadingIn`/`fadingOut` or snaps straight to
+   * `playing`/`idle` — see `optimistic.ts`.
+   */
+  fadeInSec: number;
+  fadeOutSec: number;
 }
 
 export interface RemoteTab {
@@ -138,16 +146,22 @@ export function buildSnapshot(input: SnapshotInput): RemoteSnapshot {
 // Every WebSocket frame is one JSON object tagged by `k`. The DO relays the
 // host's `state` to controllers and a controller's `cmd` to the host verbatim,
 // and injects its own `peers` count toward hosts. Received `d` is untrusted and
-// re-validated on arrival (commands through `parseCommand`).
+// re-validated on arrival (commands through `parseCommand`). `id`/`ack`/
+// `mismatch` are a lightweight, additive command-acknowledgement channel: the
+// phone tags each sent command with an id, and the host reports back which
+// ids it applied — split by whether the command's own claim about the
+// current state (see `activateCue`'s `fromState`) held up — so the phone can
+// tell "the host applied my command" from "the host said something" (a
+// heartbeat, another controller's change, ...).
 
 /** Sent by the player. `state` is relayed to every controller. */
-export type HostFrame = { k: 'state'; d: RemoteSnapshot };
+export type HostFrame = { k: 'state'; d: RemoteSnapshot; ack?: string[]; mismatch?: string[] };
 /** Sent by a phone. `cmd` is relayed to the host. */
-export type ControllerFrame = { k: 'cmd'; d: RemoteCommand };
+export type ControllerFrame = { k: 'cmd'; id: string; d: RemoteCommand };
 /** What the player receives: a relayed command, or the DO's device count. */
-export type HostInbound = { k: 'cmd'; d: unknown } | { k: 'peers'; n: number };
+export type HostInbound = { k: 'cmd'; id?: string; d: unknown } | { k: 'peers'; n: number };
 /** What a phone receives: a relayed state snapshot. */
-export type ControllerInbound = { k: 'state'; d: unknown };
+export type ControllerInbound = { k: 'state'; d: unknown; ack?: unknown; mismatch?: unknown };
 
 // ---- Commands the phone may send (phone → host) ---------------------------
 
@@ -158,7 +172,7 @@ export type ControllerInbound = { k: 'state'; d: unknown };
  * show, not rewrite it.
  */
 export type RemoteCommand =
-  | { t: 'activateCue'; cueId: string }
+  | { t: 'activateCue'; cueId: string; fromState: PlaybackState }
   | { t: 'setTab'; tabId: string }
   | { t: 'selectDoc'; docId: string }
   | { t: 'stopAll'; fade: boolean }
@@ -173,7 +187,13 @@ export type RemoteCommand =
 
 /** The actions a `RemoteCommand` maps to. The host adapts these onto `app`. */
 export interface RemoteHostActions {
-  activateCue(cueId: string): void;
+  /**
+   * Returns whether `fromState` — the cue's state as last known to the phone
+   * — matched its actual state when the host processed the tap. Always
+   * toggles the cue regardless of the answer; the return value only tells
+   * the phone whether its own prediction of the outcome is trustworthy.
+   */
+  activateCue(cueId: string, fromState: PlaybackState): boolean;
   setTab(tabId: string): void;
   selectDoc(docId: string): void;
   stopAll(fade: boolean): void;
@@ -193,12 +213,20 @@ export interface RemoteHostActions {
  * until proven otherwise, and this is the gate that keeps a stray or hostile
  * payload from reaching `app`.
  */
+const PLAYBACK_STATES: readonly PlaybackState[] = ['idle', 'fadingIn', 'playing', 'fadingOut'];
+
+function isPlaybackState(v: unknown): v is PlaybackState {
+  return typeof v === 'string' && (PLAYBACK_STATES as readonly string[]).includes(v);
+}
+
 export function parseCommand(raw: unknown): RemoteCommand | null {
   if (!raw || typeof raw !== 'object') return null;
   const c = raw as Record<string, unknown>;
   switch (c.t) {
     case 'activateCue':
-      return typeof c.cueId === 'string' ? { t: 'activateCue', cueId: c.cueId } : null;
+      return typeof c.cueId === 'string' && isPlaybackState(c.fromState)
+        ? { t: 'activateCue', cueId: c.cueId, fromState: c.fromState }
+        : null;
     case 'setTab':
       return typeof c.tabId === 'string' ? { t: 'setTab', tabId: c.tabId } : null;
     case 'selectDoc':
@@ -228,18 +256,29 @@ export function parseCommand(raw: unknown): RemoteCommand | null {
   }
 }
 
+export interface CommandResult {
+  /** Whether the message parsed into a known command. */
+  valid: boolean;
+  /**
+   * Whether the sender's claim about the current state held up — only
+   * meaningful for `activateCue` (see `RemoteHostActions.activateCue`); every
+   * other command is always `true` here, since they set absolute values and
+   * have no "claim" to validate.
+   */
+  matched: boolean;
+}
+
 /**
- * Validate and dispatch one inbound message. Returns whether it was a valid
- * command — the host can count rejections. Never throws on bad input; an
- * unparseable message is simply ignored.
+ * Validate and dispatch one inbound message. Never throws on bad input; an
+ * unparseable message is simply ignored. The host can count rejections via
+ * `valid`.
  */
-export function applyCommand(host: RemoteHostActions, raw: unknown): boolean {
+export function applyCommand(host: RemoteHostActions, raw: unknown): CommandResult {
   const cmd = parseCommand(raw);
-  if (!cmd) return false;
+  if (!cmd) return { valid: false, matched: true };
   switch (cmd.t) {
     case 'activateCue':
-      host.activateCue(cmd.cueId);
-      break;
+      return { valid: true, matched: host.activateCue(cmd.cueId, cmd.fromState) };
     case 'setTab':
       host.setTab(cmd.tabId);
       break;
@@ -274,7 +313,7 @@ export function applyCommand(host: RemoteHostActions, raw: unknown): boolean {
       host.setMaster(cmd.value);
       break;
   }
-  return true;
+  return { valid: true, matched: true };
 }
 
 // ---- Pairing (room + controller key) --------------------------------------
